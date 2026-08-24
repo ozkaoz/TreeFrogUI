@@ -1,43 +1,19 @@
-# CURRENT.md — Snapshot Verificable — TreeFrogUI R36SX V2.6 Fork
+# CURRENT.md — Compat Stub — TreeFrogUI R36SX V2.6 Fork
 
-> **CURRENT.md IS A CACHE.** Instantánea potencialmente obsoleta. La autoridad es `git status` / `git log` / `git submodule status` / `git remote -v` y la evidencia directa. Si este fichero contradice Git, gana Git — reparar este fichero primero. No es changelog ni historial.
+> **CURRENT.md IS A CACHE.** Snapshot verificado obsoleto.
+> **Canonical mutable state:** `docs/PROJECT_STATE.md` — verificar con `git rev-parse HEAD`, `git status --short --branch`, `git submodule status`, `git remote -v`.
 
-**Fecha:** 2026-08-23 (UTC)
-**Repo local:** `D:\R36SX\treefrog-ui-r36sx`
-**GitHub Fork (origin):** `https://github.com/ozkaoz/treefrog-ui-r36sx.git` — `origin`
-**Upstream:** `https://github.com/tzubertowski/treefrog-ui.git` — `upstream`
-**Branch activa:** `r36sx-v2.6-dev` (creada desde `v1.0.15`)
-**HEAD:** `27f3bf33e906d90e0cd267059bf0559afc6f8a05` — `27f3bf3 Clarify R36HD backup entry` (tag `v1.0.15`)
-**Baseline:** `v1.0.15` → `27f3bf33e906d90e0cd267059bf0559afc6f8a05`
-**Tag upstream verificado:** `v1.0.15` existe (`git rev-parse v1.0.15`); `v1.1.0_b` es `upstream/main` HEAD actual (`41f15e24e124f90ad23146de217a8f3408921d02`) — no es baseline.
-**Submodule `frogui`:** `15ea12bb4f6f642b1ec02aabebbad33e5e95ed2b` — `v0.1.3-123-g15ea12b` — branch `sf3000` — URL `git@github.com:tzubertowski/FrogUI.git` (local override HTTPS `https://github.com/`→`git@github.com:` via `url.insteadOf`)
-**Remotes:**
+Este fichero se mantiene solo para compatibilidad con tooling que aún referencia `CURRENT.md` (ver `opencode.json` previo). No duplicar estado aquí — toda referencia nueva debe usar `docs/PROJECT_STATE.md`.
+
+- **Snapshot anterior:** `v1.0.15 → 27f3bf33e906d90e0cd267059bf0559afc6f8a05` (tag), `r36sx-v2.6-dev HEAD 76a6dca` al 2026-08-24 — ver `docs/PROJECT_STATE.md` para `LAST_VERIFIED_UTC`, `CURRENT_HEAD`, `FROGUI 15ea12b`, `DEPENDENCY_LOCK`.
+- **Golden:** `SOURCE_BASELINE = v1.0.15 + 27f3bf3` — `PHYSICAL_GOLDEN = NONE / NOT YET ESTABLISHED` — `RELEASE_GOLDEN = NONE / NOT YET ESTABLISHED` (snapshot verifiable, cache)
+- **PHYSICAL_GOLDEN = NONE / NOT YET ESTABLISHED** — no hay `PHYSICAL PASS` inventado; requiere hardware R36SX V2.6 real fechado (`docs/TESTING.md`, `docs/ai/VALIDATION.md`).
+- **Instrucciones canónicas:** `AGENTS.md` → `docs/PROJECT_STATE.md` → `CONTEXT_MAP.md` → `docs/DEVELOPMENT.md` → `docs/BUILDING.md` → resto en `docs/README.md`.
+
 ```
-origin    https://github.com/ozkaoz/treefrog-ui-r36sx.git (fetch/push)
-upstream  https://github.com/tzubertowski/treefrog-ui.git (fetch/push)
+AGENTS.md (constitución) → docs/PROJECT_STATE.md (snapshot mutable)
+                         → CONTEXT_MAP.md (router)
+                         → DECISIONS.md (duraderas)
 ```
-**Worktree (al bootstrap, antes de commit):** `DIRTY` — ficheros bootstrap CLASS A sin commitear (AGENTS.md, CURRENT.md, CONTEXT_MAP.md, DECISIONS.md, docs/ai/*, scripts/agent_preflight.py, tests/test_agent_context_contract.py, .opencode/agents/*). Ver `git status --short --branch`. `PREFLIGHT_RESULT=FAIL` sin `--allow-dirty`; `PASS` con `--allow-dirty` es esperado en esta fase.
-**Último preflight:** `python scripts/agent_preflight.py --allow-dirty` → `PREFLIGHT=PASS (allow-dirty)` / sin flag → `FAIL:DIRTY_WORKTREE` (correcto, no es error). `python tests/test_agent_context_contract.py` → `PASS` esperado tras bootstrap.
-**Objetivo actual:** Bootstrap CLASS A completado. Fork `ozkaoz/treefrog-ui-r36sx` creado y clonado en `D:\R36SX\treefrog-ui-r36sx`; rama `r36sx-v2.6-dev` anclada a `v1.0.15`; submodules inicializados; infraestructura de agentes/documental implantada. NO compilar, NO tocar runtime/hijack/drivers/SD, NO publicar.
-**Golden states:**
-```
-SOURCE_BASELINE = v1.0.15 + 27f3bf33e906d90e0cd267059bf0559afc6f8a05
-PHYSICAL_GOLDEN = NONE / NOT YET ESTABLISHED
-RELEASE_GOLDEN  = NONE / NOT YET ESTABLISHED
-```
-**Riesgos conocidos:**
-- R36SX v2.6/v2.7 comparten `install_first/r36sx` pero el kernel/DTB difiere; la selección de `driver_r36sx.so` vs `driver_r36sx27.so` es runtime (SIGBUS-count) — documentado en `hijack/zhijack.tpl.sh`.
-- `build_release.sh` contiene rutas absolutas del mantenedor (`/home/tomaszz/...`) — requiere revisión antes de build reproducible en WSL.
-- `.gitmodules` usa SSH (`git@github.com:`) — requiere `url.insteadOf` local HTTPS en Windows sin clave SSH.
-- `release/` no existe en este checkout (gitignored) — no hay artefacto empaquetado que validar.
-- `PHYSICAL_EVIDENCE=NONE — NOT TESTED` — ninguna afirmación de validación en hardware.
 
-**Siguiente acción exacta:**
-1. Verificar `python tests/test_agent_context_contract.py` y `python scripts/agent_preflight.py --allow-dirty`.
-2. Mostrar `git status --short --branch; git diff --stat; git remote -v; git submodule status; git log -5`.
-3. Hacer commit CLASS A del bootstrap (requiere aprobación humana) — NO push, NO release.
-4. Siguiente fase (post-bootstrap): toolchain WSL, auditoría `build_release.sh` / staging, pero NO modificar runtime/hijack hasta decisión explícita.
-
-**Change class del bootstrap:** `CLASS A` (solo documentación/contexto + operaciones Git de fork/baseline; `RUNTIME_CHANGED=NO`, `HIJACK_CHANGED=NO`, `SD_PAYLOAD_CHANGED=NO`).
-
-**Validación:** `STATIC PASS` (vía `test_agent_context_contract.py`); `HOST PASS` pendiente de preflight limpio post-commit; todos los gates superiores `NOT TESTED`.
+Para migrar: actualizar `opencode.json` instructions a `["AGENTS.md", "docs/PROJECT_STATE.md", "CONTEXT_MAP.md"]` (ya hecho en esta fase).

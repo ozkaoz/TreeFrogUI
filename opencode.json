@@ -1,5 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "description": "TreeFrogUI R36SX V2.6 Fork — project-local OpenCode config (no global override)",
-  "instructions": ["AGENTS.md", "CURRENT.md", "CONTEXT_MAP.md"]
+  "instructions": ["AGENTS.md", "docs/PROJECT_STATE.md", "CONTEXT_MAP.md"]
 }

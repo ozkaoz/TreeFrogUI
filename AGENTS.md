@@ -1,205 +1,154 @@
-# AGENTS.md — Constitución Permanente — TreeFrogUI R36SX V2.6 Fork
+# AGENTS.md — Constitución — TreeFrogUI R36SX V2.6 Fork
 
 **Repo:** https://github.com/ozkaoz/treefrog-ui-r36sx
 **Upstream:** https://github.com/tzubertowski/treefrog-ui
-**Target:** R36SX V2.6 — Stock OS — TreeFrogUI
-**Baseline:** v1.0.15 (SHA resuelto desde Git, no hardcodeado aquí como autoridad mutable)
-**Versión:** 1.0 — 2026-08-23
+**Target primario:** R36SX V2.6 — Stock OS — TreeFrogUI (fork soporta 7 devices upstream, ver `docs/HARDWARE.md`)
+**Baseline:** `v1.0.15` (SHA verificado `git rev-parse v1.0.15`) — rama `r36sx-v2.6-dev`
+**Protocol:** `TREEFROGUI_AGENT_PROTOCOL=1` (ver `docs/ai/MULTIREPO_COORDINATION.md`)
 
-> Constitución permanente. Provider-neutral. No es historial ni snapshot.
-> Valores mutables (HEAD, branch, SHA, estado worktree) viven en `CURRENT.md` o en Git — nunca aquí como fuente primaria.
-
-```
-AGENTS.md (constitución) → CURRENT.md (snapshot verificable, potencialmente obsoleto)
-                         → CONTEXT_MAP.md (router de contexto)
-                         → DECISIONS.md (decisiones duraderas)
-                         → docs/ai/{VALIDATION.md, RELEASE_CONTRACT.md}
-```
-
----
-
-## 1. Target Inicial
+> Constitución durable, provider-neutral. Valores mutables (HEAD, branch, SHA, worktree) viven en `docs/PROJECT_STATE.md` y en Git — nunca hardcodeados aquí.
+> `CURRENT.md` es compat stub que redirige a `docs/PROJECT_STATE.md`.
 
 ```
-TARGET_DEVICE = R36SX V2.6
-BASE_OS       = Stock OS
-UPSTREAM      = tzubertowski/treefrog-ui
-BASELINE      = v1.0.15, SHA resuelto desde Git (ver CURRENT.md y `git rev-parse v1.0.15`)
-```
-
-No hardcodear HEAD actual como permanente. HEAD, branch y SHA exactos se resuelven siempre con `git`.
-
----
-
-## 2. Invariantes
-
-- Preservar el arranque Stock. No tocar particiones ni bootloader.
-- No sustituir `icube`.
-- No sustituir `rkgame`.
-- El fork debe continuar usando un mecanismo no destructivo de autorun/hijack (Stock boot → `rkgame` → `setting.xml` `<autorun>` → `libemu_tfhijack.so` → `zhijack.sh` → `picoarch/frogui`) salvo decisión técnica explícita sustentada por evidencia y registrada en `DECISIONS.md`.
-- No incluir archivos propietarios del Stock OS en Git o releases salvo que exista autorización/licencia inequívoca.
-- No incluir ROMs comerciales.
-- No incluir BIOS no redistribuibles.
-- No inferir compatibilidad física. Una compilación exitosa no valida hardware.
-- Compilar != validar en R36SX.
-- HOST PASS != PHYSICAL PASS.
-- Un árbol de desarrollo funcional no implica que un ZIP de release sea completo.
-- No publicar releases sin `PACKAGING PASS` + `CLEAN-INSTALL PHYSICAL PASS` + verificación de identidad SHA descargada.
-
----
-
-## 3. Source-of-Truth (orden)
-
-1. Requerimiento actual explícito del usuario.
-2. `AGENTS.md` (esta constitución).
-3. Decisiones `ACTIVE` de `DECISIONS.md`.
-4. Evidencia directa (Git, build, filesystem, release assets, hardware).
-5. `CURRENT.md` — snapshot verificable, potencialmente obsoleto.
-6. Documentación estructural (`CONTEXT_MAP.md`, `docs/ai/*`).
-7. Documentación histórica.
-
-Regla: `CURRENT.md IS A CACHE`. Si CURRENT contradice evidencia directa, gana la evidencia directa — reparar CURRENT primero.
-
----
-
-## 4. Golden-State Model
-
-- **SOURCE BASELINE / SOURCE GOLDEN:** `v1.0.15` + SHA real resuelto (`27f3bf33e906d90e0cd267059bf0559afc6f8a05` al momento del bootstrap; confirmar siempre con `git rev-parse v1.0.15`). Es el árbol que compila y del que parte `r36sx-v2.6-dev`.
-- **PHYSICAL GOLDEN:** payload exacto instalado en R36SX y validado físicamente. Al finalizar este bootstrap: `NONE / NOT YET ESTABLISHED`.
-- **RELEASE GOLDEN:** artefacto publicado, instalado en limpio, validado físicamente y verificado por descarga (`REMOTE_SHA == LOCAL_SHA`). Al finalizar este bootstrap: `NONE / NOT YET ESTABLISHED`.
-
-Nunca inventar `PHYSICAL PASS` ni `RELEASE GOLDEN`.
-
-```
-SOURCE_BASELINE = v1.0.15 + SHA real
-PHYSICAL_GOLDEN = NONE / NOT YET ESTABLISHED
-RELEASE_GOLDEN  = NONE / NOT YET ESTABLISHED
+AGENTS.md (constitución) → docs/PROJECT_STATE.md (snapshot mutable, verificar con git)
+                         → CONTEXT_MAP.md (router)
+                         → DECISIONS.md (duraderas)
+                         → docs/ai/{VALIDATION.md, RELEASE_CONTRACT.md, MULTIREPO_COORDINATION.md}
 ```
 
 ---
 
-## 5. Clasificación de Cambios y Gates
+## 1. Propósito
 
-### CLASS A — Context / Documentation
-Ejemplos: `AGENTS.md`, `CURRENT.md`, `CONTEXT_MAP.md`, `DECISIONS.md`, `.opencode/agents`, `docs`, tests de contrato IA.
+TreeFrogUI es un frontend libretro para handhelds MIPS Hichip. Este fork optimiza el desarrollo para R36SX V2.6 (Stock OS) preservando compatibilidad con el workspace multi-repositorio upstream y sin romper el boot Stock.
 
-Gate: `STATIC PASS`.
+## 2. Entorno canónico
 
-### CLASS B — Host tooling / Build infrastructure
-Ejemplos: scripts de desarrollo, scripts WSL, toolchain setup, auditorías, empaquetado host-only, CI, reproducibilidad de builds.
+- **WSL Ubuntu es canónico.** Toda compilación, scripting, análisis, hashing, generación de patches y operaciones Git debe correr normalmente en WSL Ubuntu.
+- Repositorios en Windows se acceden via `/mnt/<drive>/R36SX/treefrog-ui-r36sx` (ej. `D:\R36SX` → `/mnt/d/R36SX`). Drive letter **no es trust anchor** — verificar layout.
+- No mover workflows de compilación a PowerShell/Windows nativo salvo requisito Windows-only explícito.
+- Scripts son executables y pueden usar `set -euo pipefail`; **no** colocar `exit`/`set -e` a nivel top-level en documentación que pueda matar la shell interactiva del usuario — usar subshells/funciones/condicionales.
 
-Gate: `STATIC PASS + HOST PASS`.
+## 3. Arquitectura de repositorios
 
-### CLASS C — Runtime / UI
-Ejemplos: `frogui`, picoarch integration, frontend, rendering, input, audio runtime, aplicaciones integradas, cores, comportamiento visible durante ejecución.
-
-Gate mínimo: `STATIC + BUILD + HOST TESTS + PHYSICAL R36SX`.
-
-### CLASS D — Device integration / Deployment
-Ejemplos: `hijack`, `zhijack`, `autorun`, `setting.xml`, device driver selection, `install_first/r36sx`, SD layout, boot behavior.
-
-Gate: `PACKAGING PASS + PHYSICAL R36SX`.
-
-### CLASS E — Release
-Ejemplos: ZIP público, manifests, SHA256, release notes, install contract.
-
-Gate: deterministic package + `CLEAN-INSTALL PHYSICAL PASS` + downloaded asset identity verification (`DOWNLOAD-BACK PASS`).
-
-Etiquetas exactas (ver `docs/ai/VALIDATION.md`): `STATIC PASS / FAIL`, `HOST PASS / FAIL`, `BUILD PASS / FAIL`, `PACKAGING PASS / FAIL`, `PHYSICAL PASS / FAIL`, `CLEAN-INSTALL PHYSICAL PASS / FAIL`, `DOWNLOAD-BACK PASS / FAIL`. Prohibido usar `DONE / VERIFIED / VALIDATED` sin gate específico.
-
----
-
-## 6. Protocolo de Inicio (Startup)
-
-Toda sesión DEBE:
-
-1. Leer `AGENTS.md` → `CURRENT.md` → `CONTEXT_MAP.md`.
-2. Ejecutar preflight: `python scripts/agent_preflight.py` (o `python tests/test_agent_context_contract.py`).
-3. Resolver `REPO_ROOT`, `ACTIVE_BRANCH`, `HEAD`, `UPSTREAM`, `AHEAD_BEHIND`, `WORKTREE_STATE` desde **Git directamente** — nunca confiar en docs hardcodeados.
-4. Clasificar el cambio (Clase A–E) antes de editar.
-5. Delegar según clase y privilegio mínimo.
-
-Si existe `DIRTY_WORKTREE` no explicado: `PREFLIGHT_RESULT=FAIL` — reportar `git status --short --branch` y pedir autorización.
-
----
-
-## 7. Seguridad y Operaciones Prohibidas
-
-Permanentemente prohibido sin autorización explícita y evidencia:
-
-- `git reset --hard`, `git clean -fd`, `git restore` destructivo, `git checkout -- <file>`, `rm -rf`, borrado recursivo del repo, formatear unidades, `chkdsk`/`fsck`, escribir sobre SD, copiar a R36SX, crear releases, publicar assets, `force push`.
-
-El preflight y los agentes read-only nunca modifican Git, nunca tocan SD, nunca reparan filesystem.
-
-Dirty worktree no explicado → `PREFLIGHT_RESULT=FAIL / PREFLIGHT_REASON=DIRTY_WORKTREE` (solo `--allow-dirty` para inspección).
-
----
-
-## 8. Separación de Evidencia
-
-- **Estática:** lectura de repo, diff, logs Git.
-- **Build:** compilación cruzada (requiere toolchain, WSL).
-- **Host:** tests en host, empaquetado sin hardware.
-- **Hardware:** pruebas físicas en R36SX V2.6 real (nunca inferidas).
-- **Release:** identidad de artefacto publicado y descargado.
-
-Ningún gate superior puede inferirse de uno inferior.
-
----
-
-## 9. Agentes y Privilegio Mínimo
-
-- `treefrog-lead` (primary, orquestador): lee constitución, ejecuta preflight, clasifica, delega. No modifica código productivo directamente salvo CLASS A menor. Solo delega a `audit`, `implement`, `review`, `release`, `upstream-sync`.
-- `audit` (read-only): `edit: deny`, `task: deny`, `external_directory: deny`. Solo lectura y Git diagnóstico. Nunca puede delegar a `implement`.
-- `review` (read-only independiente): `edit: deny`, `task: deny`. Revisa diff y pruebas sin corregir sus propios hallazgos.
-- `implement` (edición scopada): requiere preflight, clase conocida, nunca infiere `PHYSICAL PASS`. Solo puede delegar a `audit`/`review`. Debe negar `git reset --hard`, `git clean`, `rm -rf`, `force push`, `filesystem repair`. `git commit`/`git push`/publicación requieren `ask`.
-- `release` (no implement): puede usar `audit`/`review`, nunca llamar a `implement`. `tag`/`push`/`publish` = `ask`. Nunca publica sin `PACKAGING PASS` + `CLEAN-INSTALL PHYSICAL PASS` + SHA identity.
-- `upstream-sync` (read-only por ahora): `git fetch upstream`, comparar, listar tags, analizar divergencia, recomendar `merge`/`rebase`/`cherry-pick`. No integra automáticamente. Nunca `force push`.
-
-Provider-neutral: `AGENTS.md` es canónico. Si existen `CLAUDE.md`/`GEMINI.md` deben ser routers mínimos que apunten aquí — nunca duplicar política completa.
-
----
-
-## 10. Mantenimiento de Contexto
-
-- `CURRENT.md` = snapshot operativo conciso (no changelog), incluye fecha, repo local, origin/upstream, branch, HEAD, baseline, submodule, estado worktree, objetivo, último preflight, Golden states, riesgos, siguiente acción. Debe dejar claro `CURRENT.md IS A CACHE`.
-- `CONTEXT_MAP.md` = router estable (qué leer para FrogUI/picoarch/input/audio/cores/hijack/R36SX/release/...). No almacenar HEAD mutable como autoridad.
-- `DECISIONS.md` = solo decisiones duraderas con formato `ID/Date/Status/Scope/Context/Decision/Reason/Consequences/Evidence/Related files`.
-- Mantener DRY: no duplicar invariantes — referenciar `AGENTS.md`.
-
----
-
-## 11. Contrato de Release (resumen, detalle en `docs/ai/RELEASE_CONTRACT.md`)
-
-Objetivo futuro:
+Workspace multi-repositorio (no monolito):
 
 ```
-R36SX V2.6 Stock OS + contenido de UN único ZIP del fork copiado a la raíz de la SD = TreeFrogUI funcional
-POST_INSTALL_MANUAL_FIXES=0
+~/sf3000-work/
+├── treefrog-ui          ← este repo (build scripts, patches, staging, docs)
+├── FrogUI               ← tzubertowski/FrogUI@sf3000 (submodule frogui/, 15ea12b)
+├── TreeFrogUI_picoarch  ← tzubertowski/TreeFrogUI_picoarch@r36sx (display/audio, picoarch+picoarch_hi)
+├── TreeFrogUI_pcsx4all  ← standalone PS1 (opcional)
+├── cores/               ← 78 clones via clone_cores.sh (gitignored)
+└── sf3000toolchain/     ← game-de-it/sf3000 sf3000_toolchain_v0.1 (mips-mti-linux-gnu-gcc 6.3.0)
 ```
 
-El ZIP R36SX del fork debería generarse combinando el payload universal con `install_first/r36sx` para que el usuario no haga dos overlays. Durante bootstrap solo se documenta el contrato — no se implementa el nuevo empaquetado.
+- `FrogUI` es **submodule separado** — no editar `frogui/` como si fuera monolito. Reglas FrogUI documentadas en `docs/components/FROGUI.md` (parent-owned) y `docs/dev/*`.
+- `TreeFrogUI_picoarch` es repositorio hermano separado (branch `r36sx`, no submodule).
+- No fabricar commits de integración parent — cada repositorio = commits/PRs separados, linkeados entre sí.
 
-Reglas: no empaquetar `icube`/`rkgame`, no depender de ficheros residuales, FAT32 compatible, sin symlinks, manifest, SHA256, sin estado runtime temporal, sin ROMs/BIOS no redistribuibles, clean install física obligatoria antes de estable.
+Ver: `.gitmodules`, `build_all.sh`, `build_release.sh`, `clone_cores.sh`, `Makefile.sf3000`, `docs/BUILDING.md`, `docs/dev/UPSTREAM_REPOSITORY_MAP.md`.
 
----
+## 4. Invariantes
 
-## 12. Condiciones de Parada
+- Preservar arranque Stock. No tocar particiones/bootloader; **no sustituir `icube`/`rkgame`** (SF3500 verifica boot — reemplazar = "sdcard is damaged").
+- Mecanismo no destructivo obligatorio: `Stock boot → rkgame → setting.xml <autorun file="/mnt/sdcard/MD/dummy.md" driver=""> → libemu_tfhijack.so → zhijack.sh (generado por device) → picoarch/frogui` salvo decisión explícita en `DECISIONS.md`.
+- No incluir blobs propietarios Stock OS, ROMs comerciales, BIOS no redistribuibles en Git/releases sin autorización inequívoca.
+- **Compilar != validar.** `BUILD PASS` / `HOST PASS` nunca implica `PHYSICAL PASS`.
+- No publicar releases sin `PACKAGING PASS` + `CLEAN-INSTALL PHYSICAL PASS` + `DOWNLOAD-BACK PASS` (`REMOTE_SHA == LOCAL_SHA`). Ver `docs/ai/RELEASE_CONTRACT.md`.
 
-Parar y pedir intervención humana cuando: regresión, dependencia inesperada, evidencia contradice hipótesis, scope creep, evidencia insuficiente, checkpoint necesita humano, o se requiere validación física sin hardware disponible. No auto-continuar encadenando fix B tras fix A sin re-validar.
+## 5. Source of Truth (orden)
 
----
+1. Requerimiento explícito del usuario actual
+2. `AGENTS.md` (esta constitución) + `docs/ai/MULTIREPO_COORDINATION.md` (protocolo `TREEFROGUI_AGENT_PROTOCOL=1`)
+3. Decisiones `ACTIVE` de `DECISIONS.md`
+4. Evidencia directa (Git, build, filesystem, release assets, hardware)
+5. `docs/PROJECT_STATE.md` — snapshot mutable, potencialmente obsoleto (verificar `git rev-parse HEAD`, `git status`, `git submodule status`)
+6. `docs/DEVELOPMENT.md` → `docs/BUILDING.md` → `docs/TESTING.md` → `docs/HARDWARE.md` → `docs/SD_SAFETY.md` → `docs/UPSTREAM.md` → `docs/RELEASING.md`
+7. Documentación estructural (`CONTEXT_MAP.md`, `docs/ai/*`, `docs/dev/*`)
+8. Histórica
 
-## 13. Handoff Compacto
+Regla: si `docs/PROJECT_STATE.md` contradice Git, gana Git — reparar snapshot primero.
 
-```
-CHANGE_CLASS=  FILES_CHANGED=  HEAD=  CHECKS_RUN=  PHYSICAL_EVIDENCE=  RELEASE_EVIDENCE=  BLOCKER=  NEXT_EXACT_ACTION=  STOP_CONDITION=
-```
+## 6. Clasificación y gates (resumen)
 
-Logs crudos van a ficheros de evidencia dedicados, no a `CURRENT.md`. Handoff debe ser reproducible solo con Git + evidencias.
+| Clase | Alcance | Gate mínimo | Detalle |
+|-------|---------|-------------|---------|
+| A | Context/docs, `AGENTS.md`, `CONTEXT_MAP.md`, `DECISIONS.md`, `docs`, contrato IA | `STATIC PASS` | `python tests/test_agent_context_contract.py` |
+| B | Host tooling, scripts WSL, toolchain, audits | `STATIC+HOST PASS` | + `tests/test_release_base_selection.sh`, `bash -n` |
+| C | Runtime/UI, `frogui`, picoarch, cores | `STATIC+BUILD+HOST+PHYSICAL` | requiere R36SX real |
+| D | Device integration, `hijack/zhijack`, `setting.xml`, drivers | `PACKAGING+PHYSICAL` | staging `release/latest/release` |
+| E | Release ZIP, manifest, SHA256 | `PACKAGING+CLEAN-INSTALL PHYSICAL+DOWNLOAD-BACK` | `7z t`, `SHA256SUMS` |
 
----
+Etiquetas exactas en `docs/ai/VALIDATION.md`: `STATIC/HOST/BUILD/PACKAGING/PHYSICAL/CLEAN-INSTALL/DOWNLOAD-BACK PASS/FAIL`. Prohibido `DONE/VERIFIED` sin gate.
 
-## 14. Regla Permanente
+## 7. Reglas epistémicas (anti-alucinación)
 
-> La evidencia tiene prioridad sobre el plan. Si nueva evidencia contradice contexto escrito, actualizar contexto PRIMERO, ajustar hipótesis, y continuar solo desde el siguiente checkpoint válido. Compilar no es validar. `STATIC PASS + HOST PASS` nunca equivale a `PHYSICAL PASS`. Mantener los ficheros de contexto precisos es trabajo de ingeniería.
+Distinguir explícitamente:
+
+- **FACT** — verificable en Git/build/filesystem (`git rev-parse v1.0.15 == 27f3bf3...`)
+- **PHYSICAL_EVIDENCE** — observado en hardware R36SX V2.6 real (foto/log fechado, SHA, device)
+- **INFERENCE** — deducido de evidencia parcial
+- **HYPOTHESIS** — no probado, requiere validación
+- **UNCONFIRMED** — no verificable sin red/hardware
+
+Nunca afirmar:
+
+- "source commit oficial" sin `HIGH` confidence pin o reproducción
+- `PHYSICAL PASS` sin reporte humano de hardware
+- `driver cargado` / `device existe` por solo strings binarios
+
+Usar confianzas `HIGH/MEDIUM/LOW` (ver `docs/DEPENDENCY_LOCK.md`, `docs/UPSTREAM.md`). Nombrar `historical_exactness=NOT_CLAIMED` si no reproducido.
+
+## 8. Startup obligatorio
+
+1. Leer `AGENTS.md` → `docs/PROJECT_STATE.md` → `CONTEXT_MAP.md`
+2. `python scripts/agent_preflight.py` (`--allow-dirty` solo inspección)
+3. Resolver `REPO_ROOT / BRANCH / HEAD / ORIGIN / UPSTREAM / AHEAD_BEHIND / WORKTREE` desde **Git** (`git rev-parse HEAD`, `git status --short --branch`, `git submodule status`)
+4. Clasificar cambio A–E (ver §6)
+5. Delegar con privilegio mínimo
+
+`DIRTY_WORKTREE` no explicado → `PREFLIGHT_RESULT=FAIL` — reportar `git status` y pedir autorización.
+
+## 9. Git y seguridad
+
+- No `git reset --hard`, `git clean -fd`, `restore` destructivo, `rm -rf`, `force push`, `mkfs/chkdsk/fsck` sobre SD, `cp` a SD, crear releases/publicar assets sin autorización y sin gates.
+- Preservar remotes `origin` (fork) y `upstream` (tzubertowski). Push solo a `origin` salvo autorización explícita.
+- No `force push` tras revisión de PR. Commits enfocados, sin cambios no relacionados. Repos separados = commits/PRs separados, linkeados.
+- `git commit`/`push`/`tag`/`gh release` = `ask`. Agentes read-only nunca delegan a `implement`.
+- Preflight y agentes read-only nunca modifican Git/SD/filesystem.
+
+## 10. Validación física y SD
+
+- **Host/Build pueden automatizarse; físico requiere humano.** Agentes solo reportan `STATIC/HOST/BUILD PASS`; nunca `PHYSICAL PASS` / `CLEAN-INSTALL PASS` sin observación humana (`docs/TESTING.md`, `docs/HARDWARE.md`).
+- Todo cambio `hijack`/`zhijack`/`driver` requiere `PACKAGING PASS` + boot físico documentado (`FIRMWARE/BASELINE`, `ARTIFACT_SHA256`, `TEST_MATRIX`, `USER_OBSERVATIONS`, `PASS/FAIL`, `DATE`).
+- SD: ver `docs/SD_SAFETY.md` — identificar por layout no por letra, backup+SHA256 antes de overwrite, solo ficheros autorizados, readback+hash tras write, rollback preservado, nunca formato/fsck automático, eject seguro es acción humana. Windows `G:\cubegm` → WSL `/mnt/g/cubegm` (drive no es anchor).
+
+## 11. Kernel / rootfs / DTB
+
+Cambios requieren **autorización explícita + evidencia**:
+
+`rmmod`/`insmod`/`kernel`/`DTB`/`rootfs`/`vendor driver`/`sysfs` hardware writes. No tocar particiones. Stock blobs solo si autorización/licencia inequívoca.
+
+## 12. Ficheros generados
+
+No commitear: `build/`, `.toolchain/`, `cores/`, `release/` (artifact/latest), `*.o`/`*.lo`, `*.so` compilados, backups SD, `log.txt`/`update.log`, ROMs/BIOS, saves/screenshots, dumps diagnóstico, `venv/`, toolchain. Ver `.gitignore` y `docs/DEVELOPMENT.md`. Parches sí se versionan; fixtures de test sí.
+
+Line endings: `*.sh`/`*.py`/`*.c`/`*.h`/`*.md` = `LF` (ver `.gitattributes`). No renormalizar repo entero sin autorización — `REPOSITORY_WIDE_RENORMALIZATION=NO`.
+
+## 13. Agentes y privilegio mínimo
+
+- `treefrog-lead` (primary): clasifica, delega solo a `audit|implement|review|release|upstream-sync`, no edita runtime directo salvo CLASS A menor.
+- `audit` (read-only): `edit: deny`, `task: deny`, `external_directory: deny`. Solo Git/filesystem diagnóstico.
+- `review` (read-only): `edit: deny`, `task: deny`. Revisa diff sin auto-corregir.
+- `implement` (scoped edit): requiere preflight+clase, `task: audit/review:allow` resto `deny`, `git commit/push` = `ask`, niega `reset --hard`/`clean`/`rm -rf`/`force push`.
+- `release`: `ask` edit, verifica manifest/SHA/download-back, nunca delega a `implement`.
+- `upstream-sync` (read-only): `git fetch upstream`, compara `upstream/main..HEAD`, lista tags, recomienda `merge/rebase/cherry-pick` sin integrar.
+
+## 14. Flujo de trabajo (resumen)
+
+`READ → VERIFY BASELINE → AUDIT → PLAN MIN → BUILD → STATIC/HOST TEST → PREPARE ARTIFACT → STOP for HUMAN PHYSICAL → RECORD → COMMIT(ask) → PUSH(ask) → PR upstream` — detalle en `docs/DEVELOPMENT.md`.
+
+## 15. Regla permanente
+
+> La evidencia manda sobre el plan. Si nueva evidencia contradice docs, reparar contexto PRIMERO y continuar solo desde checkpoint válido. `STATIC+HOST` nunca equivale a `PHYSICAL`. Mantener docs precisos es ingeniería.

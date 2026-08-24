@@ -1,0 +1,28 @@
+# .gitattributes — TreeFrogUI R36SX V2.6 Fork — LF policy (no renormalization)
+# Text files: enforce LF on commit. Do NOT renormalize existing files in this phase (REPOSITORY_WIDE_RENORMALIZATION=NO).
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.patch text eol=lf
+*.cfg text eol=lf
+*.mk text eol=lf
+Makefile* text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary — no eol conversion
+*.so binary
+*.bmp binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.uImage binary
+*.bin binary

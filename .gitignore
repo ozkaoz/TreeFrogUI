@@ -7,3 +7,28 @@ sdcard/
 release/
 bios/
 bpreplay.zip
+
+# Generated / local artifacts — never commit (AGENTS.md §12, docs/DEVELOPMENT.md)
+*.o
+*.lo
+*.slo
+*.ko
+*.a
+*.la
+*.lai
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Keep source tests/fixtures/patches versioned — do not ignore:
+# !tests/test_frogui_fn.py  (untracked source, reviewed separately)
+# !tools/safe_*.c
