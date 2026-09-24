@@ -230,7 +230,7 @@ load_mtp_stack() {
     if ! grep -q '^usb_f_mtp ' /proc/modules 2>/dev/null && [ -f "$MTP_MODULE" ]; then
         insmod "$MTP_MODULE" >>"$LOG" 2>&1 || true
     fi
-    grep -q '^usb_f_mtp ' /proc/modules 2>/dev/null
+    grep -q '^usb_f_mtp ' /proc/modules 2>/dev/null || [ -d "$CONFIG_ROOT/usb_gadget" ]
 }
 
 set_mtp_peripheral_role() {
