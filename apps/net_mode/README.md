@@ -6,17 +6,21 @@ USB-gadget transports, selected by mode flags on the SD root.
 
 ## Dispatch
 
-FrogUI's USB MODE entry (`usb_mtp.sh`) launches the stack. `net_mode.sh`
-dispatches on flags in the SD root:
+The FrogUI menu has two separate entries (frogui core):
 
 ```text
-usb_mtp.sh
-  ├── /mnt/sdcard/net.mode exists -> net_mode.sh
-  │        ├── /mnt/sdcard/ppp.mode exists -> net_ppp.sh   (CDC-ACM + pppd, experimental)
-  │        ├── /mnt/sdcard/ecm.mode exists -> net_ecm.sh   (CDC-ECM, experimental)
-  │        └── otherwise                  -> net_ncm.sh   (CDC-NCM — DEFAULT, production)
-  └── otherwise -> usb_mode.sh mtp  (classic MTP, upstream verbatim)
+"USB mode" entry   -> usb_mtp.sh (UPSTREAM VERBATIM) -> usb_mode.sh mtp  (classic MTP, always)
+"Network"  entry   -> net_mode.sh (first-class)
+                      ├── /mnt/sdcard/ppp.mode exists -> net_ppp.sh   (CDC-ACM + pppd, experimental)
+                      ├── /mnt/sdcard/ecm.mode exists -> net_ecm.sh   (CDC-ECM, experimental)
+                      └── otherwise                  -> net_ncm.sh   (CDC-NCM — DEFAULT, production)
 ```
+
+Note: the legacy `net.mode` flag in the SD root is RETIRED. During the
+9-6e experiments it rerouted `usb_mtp.sh` into net_mode; now that the
+frogui core ships a dedicated Network menu entry, USB mode is always MTP
+(exactly like upstream) and the flag has no effect — remove it from old
+cards.
 
 `net_rndis.sh`, `net_serial.sh` and `net_wifi.sh` are present as transports
 but are **not currently wired into the dispatcher** (they were used during the

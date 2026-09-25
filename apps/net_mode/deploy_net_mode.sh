@@ -11,16 +11,13 @@ for f in net_mode.sh net_ecm.sh net_ncm.sh net_ppp.sh net_rndis.sh net_serial.sh
     install -m 0755 "$HERE/$f" "$DEST/$f"
 done
 
-# usb_mtp.sh dispatcher: net.mode -> net_mode.sh, otherwise classic MTP.
+# usb_mtp.sh: UPSTREAM VERBATIM (USB Mode = MTP always). The Network menu
+# entry (frogui core) launches net_mode.sh directly — first-class (AGENTS §15
+# r36sx-hclinux). The legacy net.mode SD-root flag is retired: if present on
+# an old card, remove it (it would no longer have any effect).
 cat > "$DEST/usb_mtp.sh" << 'SHIM'
 #!/bin/sh
-# TreeFrogUI USB Mode entry. Flag net.mode en la raiz SD -> modo red (apps/net_mode);
-# sin flag -> MTP clasico (upstream verbatim). Dentro de net_mode: default = NCM
-# (adaptador de red; produccion, ADR-015 r36sx-hclinux); ppp.mode/ecm.mode = experimental.
-[ -f /mnt/sdcard/log.txt ] && echo "usb_mtp mode=$( [ -f /mnt/sdcard/net.mode ] && echo net || echo mtp)" >> /mnt/sdcard/USB_MODE_INVOKE.log 2>/dev/null
-if [ -f /mnt/sdcard/net.mode ]; then
-    exec "$(dirname "$0")/net_mode.sh"
-fi
+# TreeFrogUI's user-facing USB mode entry point.  MTP keeps the SD mounted.
 exec "$(dirname "$0")/usb_mode.sh" mtp
 SHIM
 chmod 0755 "$DEST/usb_mtp.sh"
