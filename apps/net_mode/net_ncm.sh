@@ -71,6 +71,11 @@ log "UDC bound"
 n=0; while [ "$n" -lt 20 ] && [ ! -e /sys/class/net/usb0 ]; do sleep 0.5; n=$((n+1)); done
 if [ -e /sys/class/net/usb0 ]; then
     ifconfig usb0 192.168.137.2 netmask 255.255.255.0 up 2>>"$LOG" && log "usb0 UP" || log "FAIL ifconfig"
+    # 9-6d: internet via PC. El gateway es el adaptador del PC (192.168.137.1,
+    # rango ICS de Windows). Con ICS activado en el PC, este route + DNS dan
+    # salida a internet. El PC hace NAT + DNS proxy.
+    route add default gw 192.168.137.1 2>>"$LOG" && log "default gw 192.168.137.1" || log "WARN: route add failed"
+    echo "nameserver 192.168.137.1" > /etc/resolv.conf 2>>"$LOG" || log "WARN: resolv.conf"
 else
     log "FAIL: usb0 no aparecio"
 fi
@@ -101,7 +106,7 @@ fi
 # telnetd usa el shell wrapper en RAM
 telnetd -l /tmp/bin/sh 2>>"$LOG" && log "telnetd OK (RAM shell)" || log "telnetd FAIL"
 
-log "NCM READY - PC adapter IP 192.168.137.1, telnet 192.168.137.2"
+log "NCM READY - PC adapter IP 192.168.137.1 (gateway+DNS, ICS), telnet 192.168.137.2"
 sync
 
 # bloquear hasta B exit o cable unplug

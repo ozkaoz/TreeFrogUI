@@ -44,6 +44,16 @@ EPs and was the original blue-screen suspect). The console side uses
 `telnet 192.168.137.2` for a root shell. The session blocks until the cable is
 unplugged or the B button is pressed (`usb_exit_watcher`).
 
+### Internet access through the PC (9-6d)
+
+`net_ncm.sh` also installs a **default route via 192.168.137.1 and DNS** on
+the console. To give the console internet, enable **Internet Connection
+Sharing (ICS)** on the PC: share the PC's internet-connected adapter
+(Wi-Fi/Ethernet) *towards* the "TreeFrogUI Network" NCM adapter. Windows ICS
+puts the shared adapter at 192.168.137.1 (same range the stack already uses)
+and provides NAT + DNS proxy — `ping 8.8.8.8` / `wget` work from the console
+shell. Without ICS the link stays local-only (telnet/transfer).
+
 ## The AVP blue overlay (platform context)
 
 On this platform the AVP firmware paints a uniform blue overlay (`06 f2` in the
