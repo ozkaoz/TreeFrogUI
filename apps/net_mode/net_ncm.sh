@@ -1,22 +1,57 @@
 #!/bin/sh
 # net_ncm.sh — TreeFrogUI Net Mode. CDC-NCM gadget (3 EP: bulk IN + bulk OUT + intr IN).
-# USB networking adapter for Windows 7+ (native CDC-NCM driver, no extra software).
+# Modes:
+#   (no arg)  classic blocking session (watcher + restore on B/unplug)
+#   daemon    background mode: bring the network up and EXIT (menu stays usable,
+#             red viva con navegacion; toggle-off via "stop")
+#   stop      tear the daemon network down (restore)
 # RAM shell: busybox + exit_watcher copied to /tmp (avoids SD/USB bus contention).
-# B-button exit via usb_exit_watcher (SIGTERM).
-# Blue screen: AVP firmware behavior (documented, not fixable from Linux).
+# Blue screen: AVP firmware behavior (documented, not fixable from Linux). The
+# overlay is one-shot per boot (netdev down does NOT clear it); the video player
+# render path clears the residual film (AVP re-composites layers).
 LOG=/mnt/sdcard/NET_MODE_DEBUG.log
 ROLE_PATH=/sys/devices/platform/soc/18844000.usb/musb-hdrc.0.auto/mode
 UDC_NAME=musb-hdrc.0.auto
 G=/sys/kernel/config/usb_gadget/ncm_net
+MODE="${1:-session}"
+PIDF=/tmp/net_daemon.pid
 
 log() { echo "$(date '+%H:%M:%S' 2>/dev/null || echo t) $*" >> "$LOG"; }
+
+# ---- stop (daemon off) ----
+if [ "$MODE" = "stop" ]; then
+    log "daemon stop"
+    if [ -f "$PIDF" ]; then
+        kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
+        rm -f "$PIDF"
+    fi
+    killall telnetd 2>/dev/null
+    if [ -d "$G" ]; then
+        printf '\n' > "$G/UDC" 2>/dev/null
+        sleep 1
+        rm -f "$G/configs/c.1/ncm.usb0" 2>/dev/null
+        rmdir "$G/configs/c.1/strings/0x409" "$G/configs/c.1" 2>/dev/null
+        rmdir "$G/functions/ncm.usb0" "$G/strings/0x409" "$G" 2>/dev/null
+    fi
+    ifconfig usb0 0.0.0.0 down 2>/dev/null
+    route del default 2>/dev/null
+    printf 'host\n' > "$ROLE_PATH" 2>/dev/null
+    log "daemon stop done"
+    sync
+    exit 0
+fi
+
+# ---- if the daemon is already up: toggle off ----
+if [ "$MODE" = "daemon" ] && [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; then
+    exec "$0" stop
+fi
 
 NET_EXIT=0
 trap "NET_EXIT=1" TERM
 restore() {
     rc=$?
     trap - EXIT INT TERM
-    [ -n "$WATCHER_PID" ] && kill $WATCHER_PID 2>/dev/null
+    [ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null
     killall telnetd 2>/dev/null
     if [ -d "$G" ]; then
         printf '\n' > "$G/UDC" 2>/dev/null
@@ -30,10 +65,10 @@ restore() {
     sync
     exit "$rc"
 }
-trap restore EXIT INT
+[ "$MODE" = "session" ] && trap restore EXIT INT
 
 : >> "$LOG"
-log "=== NCM session uptime=$(cut -d' ' -f1 /proc/uptime) role=$(cat "$ROLE_PATH" 2>/dev/null) ==="
+log "=== NCM $MODE uptime=$(cut -d' ' -f1 /proc/uptime) role=$(cat "$ROLE_PATH" 2>/dev/null) ==="
 
 # configfs
 mkdir -p /sys/kernel/config 2>/dev/null
@@ -41,7 +76,7 @@ mount -t configfs none /sys/kernel/config 2>/dev/null || true
 [ -d /sys/kernel/config/usb_gadget ] || { log "FAIL: no configfs"; exit 1; }
 
 # gadget
-[ -d "$G" ] && { log "stale - cleaning"; restore 2>/dev/null; }
+[ -d "$G" ] && { log "stale - cleaning"; "$0" stop; sleep 1; }
 mkdir "$G" 2>>"$LOG" || { log "FAIL mkdir"; exit 1; }
 
 printf '0x0525\n' > "$G/idVendor"
@@ -90,7 +125,17 @@ echo 'export PATH=/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin' >> /tmp/bin/sh
 echo 'exec /tmp/bin/busybox sh' >> /tmp/bin/sh
 chmod +x /tmp/bin/sh
 
-# exit_watcher tambien en RAM
+# telnetd usa el shell wrapper en RAM
+telnetd -l /tmp/bin/sh 2>>"$LOG" && log "telnetd OK (RAM shell)" || log "telnetd FAIL"
+
+if [ "$MODE" = "daemon" ]; then
+    echo $$ > "$PIDF"
+    log "DAEMON UP - red viva en background, menu navegable (toggle: re-ejecutar = stop)"
+    sync
+    exit 0
+fi
+
+# ---- classic session: watcher + bloqueo ----
 EWATCH="/mnt/sdcard/cubegm/usb_exit_watcher"
 if [ -x "$EWATCH" ]; then
     cp "$EWATCH" /tmp/bin/exit_watcher 2>/dev/null
@@ -102,9 +147,6 @@ else
     log "WARN: exit_watcher no encontrado"
     WATCHER_PID=""
 fi
-
-# telnetd usa el shell wrapper en RAM
-telnetd -l /tmp/bin/sh 2>>"$LOG" && log "telnetd OK (RAM shell)" || log "telnetd FAIL"
 
 log "NCM READY - PC adapter IP 192.168.137.1 (gateway+DNS, ICS), telnet 192.168.137.2"
 sync

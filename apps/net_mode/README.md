@@ -6,21 +6,31 @@ USB-gadget transports, selected by mode flags on the SD root.
 
 ## Dispatch
 
-The FrogUI menu has two separate entries (frogui core):
+The FrogUI "Network" menu entry calls `net_mode.sh` — each invocation is a
+**TOGGLE**:
 
 ```text
-"USB mode" entry   -> usb_mtp.sh (UPSTREAM VERBATIM) -> usb_mode.sh mtp  (classic MTP, always)
-"Network"  entry   -> net_mode.sh (first-class)
-                      ├── /mnt/sdcard/ppp.mode exists -> net_ppp.sh   (CDC-ACM + pppd, experimental)
-                      ├── /mnt/sdcard/ecm.mode exists -> net_ecm.sh   (CDC-ECM, experimental)
-                      └── otherwise                  -> net_ncm.sh   (CDC-NCM — DEFAULT, production)
+"Network" entry -> net_mode.sh
+   ├── red abajo            -> net_ncm.sh daemon  (network UP in background, menu stays usable)
+   └── red arriba (daemon)  -> net_ncm.sh stop     (network DOWN, full restore)
+"USB mode" entry -> usb_mtp.sh (UPSTREAM VERBATIM) -> usb_mode.sh mtp (classic MTP, always)
 ```
 
-Note: the legacy `net.mode` flag in the SD root is RETIRED. During the
-9-6e experiments it rerouted `usb_mtp.sh` into net_mode; now that the
-frogui core ships a dedicated Network menu entry, USB mode is always MTP
-(exactly like upstream) and the flag has no effect — remove it from old
-cards.
+`session.mode` in the SD root forces the classic **blocking session** (used
+during 9-6e/9-6c testing); `ppp.mode`/`ecm.mode` select experimental
+transports.
+
+### The blue overlay and the video-player "clear" (platform quirk)
+
+While networking is active the AVP firmware paints a blue overlay over the
+display (one-shot per boot: bringing the netdev down does NOT clear it; see
+ADR-015 in r36sx-hclinux). In daemon mode the menu keeps rendering under a
+semi-transparent blue film, and **playing a video for 1-2 seconds clears the
+film** — the AVP hardware video path re-composites the display layers
+(empirically validated on-device 2026-09-25). So the practical flow is:
+Network ON → (blue film) → play any short video → menu clean with live
+internet. A minimal "layer-clear" tool is a future refinement (avp-proxy
+VIDDEC path analysis).
 
 `net_rndis.sh`, `net_serial.sh` and `net_wifi.sh` are present as transports
 but are **not currently wired into the dispatcher** (they were used during the
