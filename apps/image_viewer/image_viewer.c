@@ -26,7 +26,7 @@
 
 extern unsigned char fontdata8x8[64 * 16];
 
-#define THEME_FILE "/mnt/sdcard/cubegm/skin/skin.txt"
+#define THEME_FILE "/mnt/sdcard/treefrog/skin/skin.txt"
 #define DEVICE_FILE "/tmp/tfdevice.env"
 #define KEYMAP_FILE "/mnt/sdcard/frogui/keymap.txt"
 

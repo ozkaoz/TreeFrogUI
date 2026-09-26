@@ -136,7 +136,7 @@ if [ "$MODE" = "daemon" ]; then
 fi
 
 # ---- classic session: watcher + bloqueo ----
-EWATCH="/mnt/sdcard/cubegm/usb_exit_watcher"
+EWATCH="/mnt/sdcard/treefrog/usb_exit_watcher"
 if [ -x "$EWATCH" ]; then
     cp "$EWATCH" /tmp/bin/exit_watcher 2>/dev/null
     chmod +x /tmp/bin/exit_watcher 2>/dev/null

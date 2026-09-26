@@ -10,7 +10,7 @@ PROC_MOUNTS=${TF_USB_PROC_MOUNTS:-/proc/mounts}
 MOUNTPOINT=${TF_USB_MOUNTPOINT:-/mnt/sdcard}
 BLOCK_DEVICE=${TF_USB_BLOCK_DEVICE:-}
 PROC_SWAPS=${TF_USB_PROC_SWAPS:-/proc/swaps}
-SWAPFILE=${TF_USB_SWAPFILE:-$MOUNTPOINT/cubegm/pagefile.sys}
+SWAPFILE=${TF_USB_SWAPFILE:-$MOUNTPOINT/treefrog/pagefile.sys}
 PERSIST_LOG=${TF_USB_LOG:-$MOUNTPOINT/USB_MODE_ERROR.log}
 TRACE_LOG=/dev/null
 # Match zhijack: detailed diagnostics are opt-in through an empty log.txt in
@@ -18,10 +18,10 @@ TRACE_LOG=/dev/null
 [ -f "$MOUNTPOINT/log.txt" ] && TRACE_LOG="$MOUNTPOINT/log.txt"
 LOG=$TRACE_LOG
 RAM_LOG=/tmp/treefrog-usb-mode.log
-MODULE_DIR=${TF_USB_MODULE_DIR:-$MOUNTPOINT/cubegm/modules/$(uname -r)}
-MTP_RESPONDER=${TF_USB_MTP_RESPONDER:-$MOUNTPOINT/cubegm/mtp-server}
+MODULE_DIR=${TF_USB_MODULE_DIR:-$MOUNTPOINT/treefrog/modules/$(uname -r)}
+MTP_RESPONDER=${TF_USB_MTP_RESPONDER:-$MOUNTPOINT/treefrog/mtp-server}
 MTP_EXIT_FLAG=/tmp/treefrog_mtp_exit
-MTP_EXIT_WATCHER=${TF_USB_MTP_EXIT_WATCHER:-$MOUNTPOINT/cubegm/usb_exit_watcher}
+MTP_EXIT_WATCHER=${TF_USB_MTP_EXIT_WATCHER:-$MOUNTPOINT/treefrog/usb_exit_watcher}
 mtp_pid=
 exit_watcher_pid=
 MTP_MODULE=${TF_USB_MTP_MODULE:-$MODULE_DIR/usb_f_mtp.ko}
@@ -151,7 +151,7 @@ restore() {
 }
 
 disable_sd_swap() {
-    # The stock image enables cubegm/pagefile.sys during boot.  An active swap
+    # The stock image enables treefrog/pagefile.sys during boot.  An active swap
     # file is an open kernel reference and makes an otherwise clean SD
     # unmount fail with EBUSY.  Remember and restore it after cable removal.
     if [ -f "$SWAPFILE" ]; then

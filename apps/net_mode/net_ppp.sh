@@ -103,7 +103,7 @@ chmod +x /tmp/bin/sh
 telnetd -l /tmp/bin/sh 2>>"$LOG" && log "telnetd OK (RAM shell)" || log "telnetd FAIL"
 
 # exit_watcher (B) en RAM
-EWATCH="/mnt/sdcard/cubegm/usb_exit_watcher"
+EWATCH="/mnt/sdcard/treefrog/usb_exit_watcher"
 if [ -x "$EWATCH" ]; then
     cp "$EWATCH" /tmp/bin/exit_watcher 2>/dev/null
     chmod +x /tmp/bin/exit_watcher 2>/dev/null

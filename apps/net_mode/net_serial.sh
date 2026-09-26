@@ -79,7 +79,7 @@ else
 fi
 
 # exit_watcher para B-button
-EXIT_WATCHER="/mnt/sdcard/cubegm/usb_exit_watcher"
+EXIT_WATCHER="/mnt/sdcard/treefrog/usb_exit_watcher"
 if [ -x "$EXIT_WATCHER" ]; then
     "$EXIT_WATCHER" $$ >/dev/null 2>&1 &
     WATCHER_PID=$!

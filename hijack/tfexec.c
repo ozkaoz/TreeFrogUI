@@ -36,7 +36,7 @@ void _start(void) {
     }
     /* if exec model works, chain to the launcher */
     static char *const argv[] = { (char *)"/bin/sh",
-                                  (char *)"/mnt/sdcard/cubegm/zhijack.sh", 0 };
+                                  (char *)"/mnt/sdcard/treefrog/zhijack.sh", 0 };
     static char *const envp[] = { 0 };
     sc(SYS_execve, (long)"/bin/sh", (long)argv, (long)envp);
     sc(SYS_exit, 0, 0, 0);

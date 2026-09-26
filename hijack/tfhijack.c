@@ -1,6 +1,6 @@
 /* libemu_tfhijack.so — TreeFrogUI boot hijack (libretro core for rkgame).
  *
- * Installed by OVERRIDING a stock core file (e.g. cubegm/cores/libemu_md.so).
+ * Installed by OVERRIDING a stock core file (e.g. treefrog/cores/libemu_md.so).
  * rkgame autoboots via setting.xml:
  *   <autorun file="/mnt/sdcard/MD/dummy.md" driver="" />
  * driver="" -> rkgame resolves the core by the rom's extension (MD ->
@@ -18,7 +18,7 @@
 #include <dirent.h>
 #include <sys/types.h>
 
-#define LAUNCHER "/mnt/sdcard/cubegm/zhijack.sh"
+#define LAUNCHER "/mnt/sdcard/treefrog/zhijack.sh"
 
 static void hlog(const char *msg) {
     int fd = open("/mnt/sdcard/tfhijack.log", O_WRONLY | O_CREAT | O_APPEND, 0644);

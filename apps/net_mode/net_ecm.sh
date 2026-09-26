@@ -88,7 +88,7 @@ done
 printf '#!/tmp/bin/busybox sh\nexport PATH=/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin\nexec /tmp/bin/busybox sh\n' > /tmp/bin/sh
 chmod +x /tmp/bin/sh
 # Windows: exit_watcher en RAM
-EWATCH="/mnt/sdcard/cubegm/usb_exit_watcher"
+EWATCH="/mnt/sdcard/treefrog/usb_exit_watcher"
 if [ -x "$EWATCH" ]; then
     cp "$EWATCH" /tmp/bin/exit_watcher 2>/dev/null
     chmod +x /tmp/bin/exit_watcher

@@ -46,15 +46,15 @@ fi
 # Run a /tmp copy so the updater can atomically replace its own
 # installed file. Status 10 means success: restart through the newly installed
 # device launcher. Failures keep both the current installation and update ZIP.
-if [ -f /mnt/sdcard/cubegm/tfupdate.sh ]; then
-    cp /mnt/sdcard/cubegm/tfupdate.sh /tmp/tfupdate.sh 2>/dev/null
+if [ -f /mnt/sdcard/treefrog/tfupdate.sh ]; then
+    cp /mnt/sdcard/treefrog/tfupdate.sh /tmp/tfupdate.sh 2>/dev/null
     if [ -f /tmp/tfupdate.sh ]; then
         sh /tmp/tfupdate.sh @DEV_LABEL@
         UPDATE_RC=$?
         if [ "$UPDATE_RC" = 10 ]; then
             echo "offline update installed; restarting launcher" >> "$LOG"
             rm -rf /tmp/zhijack.lock
-            exec /mnt/sdcard/cubegm/zhijack.sh
+            exec /mnt/sdcard/treefrog/zhijack.sh
             exit 1
         elif [ "$UPDATE_RC" != 0 ]; then
             echo "offline update failed rc=$UPDATE_RC; continuing current version" >> "$LOG"
@@ -81,7 +81,7 @@ TF_ASPECT_NUM=@ASPN@
 TF_ASPECT_DEN=@ASPD@
 TF_ROTATE=@ROT@
 TF_PRESENT=@PRESENT@
-TF_DRIVER=/mnt/sdcard/cubegm/@DRIVER@
+TF_DRIVER=/mnt/sdcard/treefrog/@DRIVER@
 EOF
 export TF_DEVICE=@DEV@ TF_PANEL_W=@PW@ TF_PANEL_H=@PH@ TF_UI_SCALE=150
 
@@ -92,10 +92,10 @@ export TF_DEVICE=@DEV@ TF_PANEL_W=@PW@ TF_PANEL_H=@PH@ TF_UI_SCALE=150
 # stock driver is encrypted, switch to driver_sf3500.so. Otherwise the classic
 # SF3000 driver's audio (AUDDEC/I2SO) init fails on this hardware and picoarch
 # SIGSEGVs on the NULL sound handle (+0x270) → black-screen boot loop.
-if [ "$TF_DEVICE" = SF3000 ] && [ -f /mnt/sdcard/cubegm/driver_sf3500.so ] && \
-   [ "$(head -c4 /mnt/sdcard/cubegm/driver.so 2>/dev/null)" != "$(printf '\177ELF')" ]; then
+if [ "$TF_DEVICE" = SF3000 ] && [ -f /mnt/sdcard/treefrog/driver_sf3500.so ] && \
+   [ "$(head -c4 /mnt/sdcard/treefrog/driver.so 2>/dev/null)" != "$(printf '\177ELF')" ]; then
     sed -i -e 's/^TF_DEVICE=.*/TF_DEVICE=SF3500/' \
-           -e 's|^TF_DRIVER=.*|TF_DRIVER=/mnt/sdcard/cubegm/driver_sf3500.so|' /tmp/tfdevice.env
+           -e 's|^TF_DRIVER=.*|TF_DRIVER=/mnt/sdcard/treefrog/driver_sf3500.so|' /tmp/tfdevice.env
     export TF_DEVICE=SF3500
     echo "SF3000 with encrypted (SF3500-class) driver detected → using driver_sf3500.so" >> "$LOG"
 fi
@@ -105,8 +105,8 @@ fi
 # driver SIGBUS in hcge_open. Measure instead of guessing: run the full driver; #@R36@
 # if frogui dies with SIGBUS twice, switch permanently (marker file on SD) to   #@R36@
 # driver_r36sx27.so, the variant with the crashing 2D engine stubbed out.       #@R36@
-DRV_SAFE=/mnt/sdcard/cubegm/driver_r36sx27.so #@R36@
-DRV_FLAG=/mnt/sdcard/cubegm/driver27.flag #@R36@
+DRV_SAFE=/mnt/sdcard/treefrog/driver_r36sx27.so #@R36@
+DRV_FLAG=/mnt/sdcard/treefrog/driver27.flag #@R36@
 SIGBUS_N=0 #@R36@
 if [ -f "$DRV_FLAG" ] && [ -f "$DRV_SAFE" ]; then #@R36@
     sed -i "s|^TF_DRIVER=.*|TF_DRIVER=$DRV_SAFE|" /tmp/tfdevice.env #@R36@
@@ -115,7 +115,7 @@ fi #@R36@
 
 echo "processes at boot:" >> "$LOG"; ps >> "$LOG" 2>&1; [ "$LOG" = /dev/null ] || sync
 
-export LD_LIBRARY_PATH=/mnt/sdcard/cubegm/lib:/mnt/sdcard/cubegm/usr/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/mnt/sdcard/treefrog/lib:/mnt/sdcard/treefrog/usr/lib:$LD_LIBRARY_PATH
 
 # CPU: force max-performance governor (helps every emulator).
 for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
@@ -145,12 +145,12 @@ sleep 0.5
 TF_NOSLEEP_ADDRS="@NOSLEEP@"
 if [ -n "$TF_NOSLEEP_ADDRS" ] && grep -q '^disable_sleep=on' /mnt/sdcard/frogui/settings.txt 2>/dev/null; then
     echo 0 > /proc/sys/kernel/yama/ptrace_scope 2>/dev/null
-    [ -f /mnt/sdcard/cubegm/nosleep ] && /mnt/sdcard/cubegm/nosleep -w $TF_NOSLEEP_ADDRS >/dev/null 2>&1 &
+    [ -f /mnt/sdcard/treefrog/nosleep ] && /mnt/sdcard/treefrog/nosleep -w $TF_NOSLEEP_ADDRS >/dev/null 2>&1 &
 fi
 
-PICOARCH=/mnt/sdcard/cubegm/picoarch
-PICOARCH_HI=/mnt/sdcard/cubegm/picoarch_hi
-FROGUI_CORE=/mnt/sdcard/cubegm/cores/frogui_libretro.so
+PICOARCH=/mnt/sdcard/treefrog/picoarch
+PICOARCH_HI=/mnt/sdcard/treefrog/picoarch_hi
+FROGUI_CORE=/mnt/sdcard/treefrog/cores/frogui_libretro.so
 LAUNCH=/tmp/frogui_launch.txt
 
 ITER=0
