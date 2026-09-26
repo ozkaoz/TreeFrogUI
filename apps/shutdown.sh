@@ -1,4 +1,6 @@
 #!/bin/sh
-# Simulate the console's physical long press on the vendor power GPIO.
+# Power off via GPIO (powergpio writes to /dev/mem)
+# NOTE: use regular call, NOT exec — exec breaks the shutdown chain
 sync
-exec /mnt/sdcard/treefrog/powergpio
+/mnt/sdcard/treefrog/powergpio
+exit $?
