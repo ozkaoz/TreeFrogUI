@@ -423,15 +423,17 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 	case A_OPEN: {
 		/* Defensive copy: the service string must be NUL-terminated
 		 * (real adb sends it, len includes the NUL); never let the
-		 * parser read past data_length. */
-		char svc[MAX_PAYLOAD];
+		 * parser read past data_length. STATIC (not stack): v3 passed
+		 * a pointer into the global in_buf and the shell exec worked;
+		 * v4+ used a 4096B stack array here and every shell exec
+		 * froze — eliminate the stack-layout delta with v3. */
+		static char svc[MAX_PAYLOAD];
 		uint32_t sl = len < MAX_PAYLOAD - 1 ? len : MAX_PAYLOAD - 1;
 
 		memcpy(svc, data, sl);
 		svc[sl] = '\0';
 		if (!have_stream && strncmp(svc, "shell", 5) == 0) {
 			remote_id = h->arg0;
-			selftest_exec("open");
 			if (shell_start(svc) == 0)
 				send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 			else
