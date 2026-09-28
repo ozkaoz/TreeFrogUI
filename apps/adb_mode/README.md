@@ -19,7 +19,7 @@ that Windows can use without a COM-port terminal.
 
 | File | What |
 |---|---|
-| `min_adbd.c` | Minimal ADB daemon: ffs V2 descriptors (ff/42/01, 2 bulk EPs), CNXN (non-secure, no AUTH), `shell:` service only (v1 raw — we advertise `features=shell` so the host won't negotiate shell_v2), one-stream flow control (1 outstanding WRTE), everything else CLSE |
+| `min_adbd.c` | Minimal ADB daemon: ffs V2 descriptors (ff/42/01, 2 bulk EPs) + **empty STRINGS block (the ffs state machine requires the strings phase before ep1/ep2 files exist — f_fs.c:330-395; a zero-count block is accepted when descriptors reference no strings, f_fs.c:2600)**, CNXN (non-secure, no AUTH), `shell:` service only (v1 raw — we advertise `features=shell` so the host won't negotiate shell_v2), one-stream flow control (1 outstanding WRTE), everything else CLSE |
 | `adbd` | Prebuilt static MIPS32r2 binary — rebuild below |
 | `adb_mode.sh` | Console side: configfs gadget `adb_ffs` (0x18d1:0x4EE2), ffs mount, daemon launch (RAM copy), role switch, **retrying** UDC bind (the daemon must claim ep0/ep1/ep2 first), blocking session with B-button/cable exit, full teardown on `stop` |
 | `deploy_adb_mode.sh` | SD installer: scripts + binary + dispatcher patch + `adb.mode` flag |
@@ -35,8 +35,8 @@ that Windows can use without a COM-port terminal.
 Kernel uapi headers (`linux/usb/functionfs.h`, `ch9.h`) come from the MTI
 sysroot (`.../host/mipsel-buildroot-linux-gnu/sysroot/mipsel-r2-hard/`).
 Current binary: `adbd` SHA-256
-`516fe6e538a831896edbc8a340f20d7b60bfb8fb2e3a31026b16ca84cce325ad`
-(611540 B, `ELF 32-bit LSB MIPS32 rel2, statically linked, stripped`).
+`72784bfb5ce8171f3c7e318106f174b1c02d3a1691c28a48dd4808ba84277bd9`
+(611 KB, `ELF 32-bit LSB MIPS32 rel2, statically linked, stripped`).
 
 ## Requirements (platform side)
 

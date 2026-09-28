@@ -103,6 +103,27 @@ struct descs_v2 {
 	struct desc_block hs;
 } __attribute__((packed));
 
+/*
+ * ffs state machine: READ_DESCRIPTORS -> READ_STRINGS -> epfiles_create ->
+ * FFS_ACTIVE (f_fs.c:330-395). ep1/ep2 exist only AFTER the strings phase.
+ * Our descriptors reference no strings (iInterface=0), so the kernel accepts
+ * a minimal empty block: str_count=0 + lang_count=0 (f_fs.c:2600 "if we
+ * don't need any strings just return").
+ */
+struct strings_v2 {
+	uint32_t magic;     /* FUNCTIONFS_STRINGS_MAGIC */
+	uint32_t length;    /* 16 */
+	uint32_t str_count; /* 0 — no descriptor string refs */
+	uint32_t lang_count;
+} __attribute__((packed));
+
+static const struct strings_v2 g_strings = {
+	FUNCTIONFS_STRINGS_MAGIC,
+	sizeof(struct strings_v2),
+	0,
+	0,
+};
+
 #define DESC_BLOCK_LEN (sizeof(struct desc_block))
 
 static const struct descs_v2 g_descs = {
@@ -412,6 +433,10 @@ int main(int argc, char **argv)
 	fcntl(ep0_fd, F_SETFL, O_RDWR);
 	if (xwrite(ep0_fd, &g_descs, sizeof(g_descs)) < 0) {
 		logmsg("write descriptors: %s", strerror(errno));
+		return 1;
+	}
+	if (xwrite(ep0_fd, &g_strings, sizeof(g_strings)) < 0) {
+		logmsg("write strings: %s", strerror(errno));
 		return 1;
 	}
 	fcntl(ep0_fd, F_SETFL, O_RDWR | O_NONBLOCK);
