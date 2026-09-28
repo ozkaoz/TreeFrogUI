@@ -156,7 +156,6 @@ static int have_stream;            /* shell service open */
 static uint32_t local_id = 1;     /* our stream id */
 static uint32_t remote_id;        /* host stream id */
 static pid_t worker_pid = -1;     /* persistent ash worker */
-static int worker_in = -1;         /* daemon -> worker stdin */
 static int worker_out = -1;        /* worker stdout -> daemon */
 static int wrte_outstanding;       /* one in-flight device->host WRTE */
 static char pending_cmd[256];      /* stashed by A_OPEN, run from main loop */
@@ -288,10 +287,6 @@ static int send_pkt(uint32_t cmd, uint32_t arg0, uint32_t arg1,
 static void worker_teardown(int kill_worker, int send_clse)
 {
 	if (kill_worker) {
-		if (worker_in >= 0) {
-			close(worker_in);
-			worker_in = -1;
-		}
 		if (worker_pid > 0) {
 			kill(worker_pid, SIGKILL);
 			waitpid(worker_pid, NULL, 0);
@@ -320,29 +315,30 @@ static void ctrace(const char *msg)
 	}
 }
 
-/* Called ONLY from the main loop (top-level context). */
-static int worker_spawn(void)
+/* Called ONLY from the main loop (top-level context). cmd: the -c
+ * command string (PROVEN path: the startup selftest runs through the
+ * same wrapper with -c and its output flows; interactive ash on a
+ * pipe is the frozen variant — do NOT use it). */
+static int worker_spawn(const char *cmd)
 {
-	int in_pipe[2], out_pipe[2];
+	int out_pipe[2];
 
-	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0)
+	if (pipe(out_pipe) < 0)
 		return -1;
 	pid_t pid = fork();
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
 		ctrace("worker: pre-exec");
-		close(in_pipe[1]);
 		close(out_pipe[0]);
-		dup2(in_pipe[0], 0);
 		dup2(out_pipe[1], 1);
 		dup2(out_pipe[1], 2);
-		close(in_pipe[0]);
 		close(out_pipe[1]);
+		close(0);
 		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
 		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
 				 "/tmp/bin/sh" : "/bin/sh";
-		execl(sh, "sh", (char *)NULL);
+		execl(sh, "sh", "-c", cmd, (char *)NULL);
 		ctrace("worker: exec FAILED (see errno)");
 		{
 			int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT,
@@ -355,13 +351,11 @@ static int worker_spawn(void)
 		}
 		_exit(127);
 	}
-	close(in_pipe[0]);
 	close(out_pipe[1]);
-	worker_in = in_pipe[1];
 	worker_out = out_pipe[0];
 	fcntl(worker_out, F_SETFL, O_NONBLOCK);
 	worker_pid = pid;
-	logmsg("worker pid=%d up", pid);
+	logmsg("worker pid=%d up (cmd='%s')", pid, cmd);
 	return 0;
 }
 
@@ -386,10 +380,6 @@ static void pump_worker_out(void)
 		if (worker_out >= 0) {
 			close(worker_out);
 			worker_out = -1;
-		}
-		if (worker_in >= 0) {
-			close(worker_in);
-			worker_in = -1;
 		}
 	}
 }
@@ -432,23 +422,25 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		svc[sl] = '\0';
 		if (!have_stream && strncmp(svc, "shell", 5) == 0) {
 			remote_id = h->arg0;
-			have_stream = 1;
-			wrte_outstanding = 0;
-			/* "-c command": "shell:cmd" -> stash; the main loop
-			 * spawns the worker (top-level context) and feeds
-			 * "cmd\nexit\n". Interactive: "shell:" -> live feed. */
+			/* "-c command" only: "shell:cmd" -> stash; the main
+			 * loop spawns via -c argv (proven). Interactive
+			 * "shell:" (no command) -> CLSE (unsupported: ash
+			 * interactive on a pipe is the frozen variant). */
 			if (svc[5] == ':' && svc[6] != '\0') {
 				size_t cl = strlen(svc + 6);
 				if (cl >= sizeof(pending_cmd))
 					cl = sizeof(pending_cmd) - 1;
 				memcpy(pending_cmd, svc + 6, cl);
 				pending_cmd[cl] = '\0';
+				have_stream = 1;
+				wrte_outstanding = 0;
+				worker_spawn_needed = 1;
+				logmsg("OPEN stream (cmd='%s')", pending_cmd);
+				send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 			} else {
-				pending_cmd[0] = '\0';
+				logmsg("OPEN interactive — rejected (ash on pipe frozen)");
+				send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
 			}
-			worker_spawn_needed = 1;
-			logmsg("OPEN stream (cmd='%s')", pending_cmd);
-			send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 		} else {
 			/* only one stream; reject other services */
 			send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
@@ -460,8 +452,8 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		pump_worker_out();
 		break;
 	case A_WRTE:
-		if (have_stream && h->arg0 == remote_id && worker_in >= 0)
-			xwrite(worker_in, data, len);
+		/* -c only: no interactive stdin. Swallow (OKAY keeps the
+		 * flow control sane) — nothing to forward to. */
 		send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 		break;
 	case A_CLSE:
@@ -617,17 +609,16 @@ int main(int argc, char **argv)
 	selftest_exec("startup");
 
 	for (;;) {
-		/* TOP-LEVEL worker spawn/respawn — the ONLY fork+exec context
-		 * that reliably completes on this console (see worker note) */
+		/* TOP-LEVEL worker spawn — the ONLY fork+exec context
+		 * that reliably completes on this console (see worker note).
+		 * Command goes via -c argv (proven path); interactive streams
+		 * (no command) are rejected for now — interactive ash on a
+		 * pipe does not run on this console. */
 		if (worker_spawn_needed && worker_pid < 0) {
 			worker_spawn_needed = 0;
-			if (worker_spawn() == 0 && pending_cmd[0]) {
-				xwrite(worker_in, pending_cmd,
-					strlen(pending_cmd));
-				xwrite(worker_in, "\nexit\n", 6);
-				pending_cmd[0] = '\0';
-				logmsg("worker fed");
-			}
+			if (pending_cmd[0] && worker_spawn(pending_cmd) == 0)
+				logmsg("worker running");
+			pending_cmd[0] = '\0';
 		}
 		int n = 0;
 		pfd[n].fd = ep0_fd;
