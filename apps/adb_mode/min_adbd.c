@@ -354,6 +354,15 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 {
 	switch (h->command) {
 	case A_CNXN:
+		/* A new connection resets any orphaned stream state: a
+		 * previous host may have vanished mid-stream (probe, crash,
+		 * unplug) leaving have_stream stuck — that would CLSE-reject
+		 * every OPEN of the new connection (evidence 2026-09-27:
+		 * server OPEN -> CLSE loop after a probe left a stream open). */
+		if (have_stream) {
+			logmsg("CNXN with stale stream — resetting");
+			shell_teardown(0);
+		}
 		send_pkt(A_CNXN, A_VERSION, MAX_PAYLOAD, CNXN_PAYLOAD,
 			 (uint32_t)strlen(CNXN_PAYLOAD));
 		break;
@@ -362,11 +371,18 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		send_pkt(A_CNXN, A_VERSION, MAX_PAYLOAD, CNXN_PAYLOAD,
 			 (uint32_t)strlen(CNXN_PAYLOAD));
 		break;
-	case A_OPEN:
-		if (!have_stream && len >= 5 && len < MAX_PAYLOAD &&
-		    strncmp((const char *)data, "shell", 5) == 0) {
+	case A_OPEN: {
+		/* Defensive copy: the service string must be NUL-terminated
+		 * (real adb sends it, len includes the NUL); never let the
+		 * parser read past data_length. */
+		char svc[MAX_PAYLOAD];
+		uint32_t sl = len < MAX_PAYLOAD - 1 ? len : MAX_PAYLOAD - 1;
+
+		memcpy(svc, data, sl);
+		svc[sl] = '\0';
+		if (!have_stream && strncmp(svc, "shell", 5) == 0) {
 			remote_id = h->arg0;
-			if (shell_start((const char *)data) == 0)
+			if (shell_start(svc) == 0)
 				send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 			else
 				send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
@@ -375,6 +391,7 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 			send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
 		}
 		break;
+	}
 	case A_OKAY:
 		wrte_outstanding = 0;
 		pump_shell_out();
