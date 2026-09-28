@@ -318,9 +318,25 @@ static int shell_start(const char *service)
 		 * freeze (the selftest child, which never calls prctl, always
 		 * completes); teardown SIGKILLs the shell anyway. */
 		ctrace("pre: closes/dup2");
+		int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		if (t >= 0) {
+			dprintf(t,
+				"child[%d]: fds in=%d,%d out=%d,%d ep0=%d epin=%d epout=%d\n",
+				(int)getpid(), in_pipe[0], in_pipe[1],
+				out_pipe[0], out_pipe[1], ep0_fd, ep_in_fd,
+				ep_out_fd);
+			close(t);
+		}
 		close(in_pipe[1]);
 		close(out_pipe[0]);
-		dup2(in_pipe[0], 0);
+		/* -c commands do not read stdin: replicate the selftest child
+		 * EXACTLY (fd0 closed) — the fd0-pipe is the one remaining
+		 * delta vs the always-working selftest. */
+		int interactive = !(cmd[0] == ':' && cmd[1] != '\0');
+		if (interactive)
+			dup2(in_pipe[0], 0);
+		else
+			close(0);
 		dup2(out_pipe[1], 1);
 		dup2(out_pipe[1], 2);
 		close(in_pipe[0]);
@@ -333,12 +349,12 @@ static int shell_start(const char *service)
 		 * evidence: builtin echo OK, /bin/uname hung in execve). */
 		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
 		/* v1 raw: no PTY, interactive sh or "sh -c <cmd>" */
-		if (cmd[0] == ':' && cmd[1] != '\0')
+		if (!interactive)
 			execl(sh, "sh", "-c", cmd + 1, (char *)NULL);
 		else
 			execl(sh, "sh", (char *)NULL);
 		ctrace("exec FAILED — see errno line");
-		int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
 		if (t >= 0) {
 			dprintf(t, "child[%d]: exec errno=%d\n",
 				(int)getpid(), errno);
