@@ -110,11 +110,12 @@ mkdir -p "$FFS" 2>>"$LOG"
 mount -t functionfs adb "$FFS" 2>>"$LOG" || { log "FAIL mount functionfs"; exit 1; }
 mkdir -p /tmp/bin 2>/dev/null
 cp "$ADBD" /tmp/bin/min_adbd 2>>"$LOG" && chmod +x /tmp/bin/min_adbd
-# RAM shell + ALL applets (net_mode pattern completed): exec from the
-# bind-mounted SD while musb is active DEADLOCKS execve (evidence
-# 2026-09-28: builtin echo works, external /bin/uname hangs the child).
-# busybox --install puts every applet (uname, free, id, ls, ...) in tmpfs.
-cp /bin/busybox /tmp/bin/busybox 2>>"$LOG" && chmod +x /tmp/bin/busybox
+# RAM shell + ALL applets, STATIC busybox (the console's /bin/busybox is
+# DYNAMIC — its libc pages live on the bind-mounted SD and page-ins hang
+# with the ffs gadget live: even an ALREADY-RUNNING dynamic worker mutes
+# post-bind, evidence 2026-09-28 v15. The STATIC daemon never mutes).
+BUSYBOX_STATIC="$(dirname "$0")/busybox-static"
+cp "$BUSYBOX_STATIC" /tmp/bin/busybox 2>>"$LOG" && chmod +x /tmp/bin/busybox
 /tmp/bin/busybox --install -s /tmp/bin 2>>"$LOG"
 # Wrapper script with the post-exec alive-proof. CRITICAL: rm the
 # --install SYMLINK first — `> /tmp/bin/sh` on a symlink CLOBBERS
