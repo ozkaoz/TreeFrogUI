@@ -716,11 +716,13 @@ int main(int argc, char **argv)
 
 	for (;;) {
 		/* TOP-LEVEL command feed: pure pipe I/O to the startup
-		 * worker (no execs in the live-gadget state, ever). */
+		 * worker. NO PARENTHESES: `(cmd)` forces a subshell FORK
+		 * inside ash — forks are the suspected post-bind hang (v15/
+		 * v16 fed `(cmd)` and stayed mute); builtins must run
+		 * fork-free. */
 		if (have_stream && pending_cmd[0] && worker_in >= 0) {
-			xwrite(worker_in, "(", 1);
 			xwrite(worker_in, pending_cmd, strlen(pending_cmd));
-			xwrite(worker_in, ")\necho ", 7);
+			xwrite(worker_in, "\necho ", 6);
 			xwrite(worker_in, DONE_MARK, sizeof(DONE_MARK) - 1);
 			xwrite(worker_in, "\n", 1);
 			pending_cmd[0] = '\0';
