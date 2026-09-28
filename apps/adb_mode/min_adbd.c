@@ -155,10 +155,12 @@ static const char *g_dir = "/dev/ffs-adb";
 static int have_stream;            /* shell service open */
 static uint32_t local_id = 1;     /* our stream id */
 static uint32_t remote_id;        /* host stream id */
-static pid_t shell_pid = -1;
-static int stdin_w = -1;          /* parent -> shell stdin */
-static int stdout_r = -1;          /* shell stdout -> parent */
-static int wrte_outstanding;      /* one in-flight device->host WRTE */
+static pid_t worker_pid = -1;     /* persistent ash worker */
+static int worker_in = -1;         /* daemon -> worker stdin */
+static int worker_out = -1;        /* worker stdout -> daemon */
+static int wrte_outstanding;       /* one in-flight device->host WRTE */
+static char pending_cmd[256];      /* stashed by A_OPEN, run from main loop */
+static int worker_spawn_needed;
 
 /* host->device reassembly stream (host may split packets arbitrarily) */
 static uint8_t in_buf[2 * MAX_PAYLOAD];
@@ -269,28 +271,44 @@ static int send_pkt(uint32_t cmd, uint32_t arg0, uint32_t arg1,
 	return 0;
 }
 
-/* ---------------- shell service ---------------- */
+/* ---------------- shell worker (persistent ash) ----------------
+ * ARCHITECTURE (v11): the daemon NEVER forks from the packet-handler
+ * context — every fork+exec from inside handle_host_pkt froze in
+ * execve on this console (2026-09-28, all theories eliminated: fd
+ * collisions, fd0, prctl, RAM/SD exec, argv length 1..80, fork
+ * ordinal, 4KB stack frame). The ONLY fork+exec shape that ALWAYS
+ * completes is the one spawned from main-loop/top-level context
+ * (startup selftest: 100% success across every session).
+ * Model: ONE interactive ash worker with pipes; commands flow as
+ * stdin lines; "cmd\nexit\n" per -c open so the worker EOFs and the
+ * stream CLSEs (adb shell returns). The main loop respawns the
+ * worker at top level when a new OPEN needs one. Ash's OWN fork+exec
+ * for commands is v3-proven ("uname: invalid option" output flowed). */
 
-static void shell_teardown(int send_clse)
+static void worker_teardown(int kill_worker, int send_clse)
 {
-	if (stdin_w >= 0) {
-		close(stdin_w);
-		stdin_w = -1;
-	}
-	if (shell_pid > 0) {
-		kill(shell_pid, SIGKILL);
-		waitpid(shell_pid, NULL, 0);
-		shell_pid = -1;
-	}
-	if (stdout_r >= 0) {
-		close(stdout_r);
-		stdout_r = -1;
+	if (kill_worker) {
+		if (worker_in >= 0) {
+			close(worker_in);
+			worker_in = -1;
+		}
+		if (worker_pid > 0) {
+			kill(worker_pid, SIGKILL);
+			waitpid(worker_pid, NULL, 0);
+			worker_pid = -1;
+		}
+		if (worker_out >= 0) {
+			close(worker_out);
+			worker_out = -1;
+		}
 	}
 	if (send_clse && have_stream && ep_in_fd >= 0) {
 		send_pkt(A_CLSE, local_id, remote_id, NULL, 0);
 		wrte_outstanding = 0;
 	}
 	have_stream = 0;
+	pending_cmd[0] = '\0';
+	worker_spawn_needed = 0;
 }
 
 static void ctrace(const char *msg)
@@ -302,95 +320,67 @@ static void ctrace(const char *msg)
 	}
 }
 
-static int shell_start(const char *service)
+/* Called ONLY from the main loop (top-level context). */
+static int worker_spawn(void)
 {
 	int in_pipe[2], out_pipe[2];
-	const char *cmd = service + 5; /* skip "shell"; ":cmd" or "" */
 
 	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0)
 		return -1;
-
 	pid_t pid = fork();
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
-		/* NOTE: no prctl(PDEATHSIG) — prime suspect for the pre-exec
-		 * freeze (the selftest child, which never calls prctl, always
-		 * completes); teardown SIGKILLs the shell anyway. */
-		ctrace("pre: closes/dup2");
-		int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
-		if (t >= 0) {
-			dprintf(t,
-				"child[%d]: fds in=%d,%d out=%d,%d ep0=%d epin=%d epout=%d\n",
-				(int)getpid(), in_pipe[0], in_pipe[1],
-				out_pipe[0], out_pipe[1], ep0_fd, ep_in_fd,
-				ep_out_fd);
-			close(t);
-		}
 		close(in_pipe[1]);
 		close(out_pipe[0]);
-		/* -c commands do not read stdin: replicate the selftest child
-		 * EXACTLY (fd0 closed) — the fd0-pipe is the one remaining
-		 * delta vs the always-working selftest. */
-		int interactive = !(cmd[0] == ':' && cmd[1] != '\0');
-		if (interactive)
-			dup2(in_pipe[0], 0);
-		else
-			close(0);
+		dup2(in_pipe[0], 0);
 		dup2(out_pipe[1], 1);
 		dup2(out_pipe[1], 2);
 		close(in_pipe[0]);
 		close(out_pipe[1]);
-		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
-					 "/tmp/bin/sh" : "/bin/sh";
-		ctrace("pre: exec");
-		/* PATH: RAM applets first — external command execs from the
-		 * bind-mounted SD deadlock with the musb active (2026-09-28
-		 * evidence: builtin echo OK, /bin/uname hung in execve). */
 		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
-		/* v1 raw: no PTY, interactive sh or "sh -c <cmd>" */
-		if (!interactive)
-			execl(sh, "sh", "-c", cmd + 1, (char *)NULL);
-		else
-			execl(sh, "sh", (char *)NULL);
-		ctrace("exec FAILED — see errno line");
-		t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
-		if (t >= 0) {
-			dprintf(t, "child[%d]: exec errno=%d\n",
-				(int)getpid(), errno);
-			close(t);
-		}
+		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
+				 "/tmp/bin/sh" : "/bin/sh";
+		execl(sh, "sh", (char *)NULL);
+		ctrace("worker: exec FAILED");
 		_exit(127);
 	}
 	close(in_pipe[0]);
 	close(out_pipe[1]);
-	stdin_w = in_pipe[1];
-	stdout_r = out_pipe[0];
-	/* non-blocking: pump_shell_out() is also called from A_OKAY handling
-	 * where no poll() guarantee exists — EAGAIN must mean "nothing yet" */
-	fcntl(stdout_r, F_SETFL, O_NONBLOCK);
-	shell_pid = pid;
-	have_stream = 1;
-	wrte_outstanding = 0;
-	logmsg("shell pid=%d service='%s'", pid, service);
+	worker_in = in_pipe[1];
+	worker_out = out_pipe[0];
+	fcntl(worker_out, F_SETFL, O_NONBLOCK);
+	worker_pid = pid;
+	logmsg("worker pid=%d up", pid);
 	return 0;
 }
 
-/* forward shell stdout as WRTE (respecting 1-packet flow control) */
-static void pump_shell_out(void)
+/* forward worker stdout as WRTE (respecting 1-packet flow control) */
+static void pump_worker_out(void)
 {
 	static uint8_t chunk[MAX_PAYLOAD];
-	if (!have_stream || wrte_outstanding || stdout_r < 0)
+	if (!have_stream || wrte_outstanding || worker_out < 0)
 		return;
-	ssize_t r = read(stdout_r, chunk, sizeof(chunk));
+	ssize_t r = read(worker_out, chunk, sizeof(chunk));
 	if (r > 0) {
 		int rc = send_pkt(A_WRTE, local_id, remote_id, chunk, (uint32_t)r);
-		logmsg("pump: %zd bytes -> WRTE rc=%d", r, rc);
+		logmsg("pump: %zd bytes rc=%d", r, rc);
 		if (rc == 0)
 			wrte_outstanding = 1;
 	} else if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
-		logmsg("shell eof/err (r=%zd errno=%d)", r, errno);
-		shell_teardown(1);
+		logmsg("worker eof/err (r=%zd errno=%d)", r, errno);
+		/* -c command finished (worker ran `exit`): close the stream;
+		 * the worker is dead — a future OPEN respawns at top level */
+		worker_teardown(0, 1);
+		worker_pid = -1;
+		if (worker_out >= 0) {
+			close(worker_out);
+			worker_out = -1;
+		}
+		if (worker_in >= 0) {
+			close(worker_in);
+			worker_in = -1;
+		}
 	}
 }
 
@@ -410,7 +400,7 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		 * server OPEN -> CLSE loop after a probe left a stream open). */
 		if (have_stream) {
 			logmsg("CNXN with stale stream — resetting");
-			shell_teardown(0);
+			worker_teardown(1, 0);
 		}
 		send_pkt(A_CNXN, A_VERSION, MAX_PAYLOAD, CNXN_PAYLOAD,
 			 (uint32_t)strlen(CNXN_PAYLOAD));
@@ -423,10 +413,8 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 	case A_OPEN: {
 		/* Defensive copy: the service string must be NUL-terminated
 		 * (real adb sends it, len includes the NUL); never let the
-		 * parser read past data_length. STATIC (not stack): v3 passed
-		 * a pointer into the global in_buf and the shell exec worked;
-		 * v4+ used a 4096B stack array here and every shell exec
-		 * froze — eliminate the stack-layout delta with v3. */
+		 * parser read past data_length. NO FORK HERE — see the
+		 * worker architecture note above. */
 		static char svc[MAX_PAYLOAD];
 		uint32_t sl = len < MAX_PAYLOAD - 1 ? len : MAX_PAYLOAD - 1;
 
@@ -434,10 +422,23 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		svc[sl] = '\0';
 		if (!have_stream && strncmp(svc, "shell", 5) == 0) {
 			remote_id = h->arg0;
-			if (shell_start(svc) == 0)
-				send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
-			else
-				send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
+			have_stream = 1;
+			wrte_outstanding = 0;
+			/* "-c command": "shell:cmd" -> stash; the main loop
+			 * spawns the worker (top-level context) and feeds
+			 * "cmd\nexit\n". Interactive: "shell:" -> live feed. */
+			if (svc[5] == ':' && svc[6] != '\0') {
+				size_t cl = strlen(svc + 6);
+				if (cl >= sizeof(pending_cmd))
+					cl = sizeof(pending_cmd) - 1;
+				memcpy(pending_cmd, svc + 6, cl);
+				pending_cmd[cl] = '\0';
+			} else {
+				pending_cmd[0] = '\0';
+			}
+			worker_spawn_needed = 1;
+			logmsg("OPEN stream (cmd='%s')", pending_cmd);
+			send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 		} else {
 			/* only one stream; reject other services */
 			send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
@@ -446,15 +447,15 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 	}
 	case A_OKAY:
 		wrte_outstanding = 0;
-		pump_shell_out();
+		pump_worker_out();
 		break;
 	case A_WRTE:
-		if (have_stream && h->arg0 == remote_id && stdin_w >= 0)
-			xwrite(stdin_w, data, len);
+		if (have_stream && h->arg0 == remote_id && worker_in >= 0)
+			xwrite(worker_in, data, len);
 		send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 		break;
 	case A_CLSE:
-		shell_teardown(0);
+		worker_teardown(1, 0);
 		send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
 		break;
 	default:
@@ -606,6 +607,17 @@ int main(int argc, char **argv)
 	selftest_exec("startup");
 
 	for (;;) {
+		/* TOP-LEVEL worker spawn/respawn — the ONLY fork+exec context
+		 * that reliably completes on this console (see worker note) */
+		if (worker_spawn_needed && worker_pid < 0) {
+			worker_spawn_needed = 0;
+			if (worker_spawn() == 0 && pending_cmd[0]) {
+				xwrite(worker_in, pending_cmd,
+					strlen(pending_cmd));
+				xwrite(worker_in, "\nexit\n", 6);
+				pending_cmd[0] = '\0';
+			}
+		}
 		int n = 0;
 		pfd[n].fd = ep0_fd;
 		pfd[n].events = POLLIN;
@@ -614,9 +626,9 @@ int main(int argc, char **argv)
 		pfd[n].events = POLLIN;
 		n++;
 		int shell_idx = -1;
-		if (have_stream && stdout_r >= 0) {
+		if (have_stream && worker_out >= 0) {
 			shell_idx = n;
-			pfd[n].fd = stdout_r;
+			pfd[n].fd = worker_out;
 			pfd[n].events = POLLIN;
 			n++;
 		}
@@ -663,9 +675,9 @@ int main(int argc, char **argv)
 			}
 		}
 		if (shell_idx >= 0 && pfd[shell_idx].revents & POLLIN)
-			pump_shell_out();
+			pump_worker_out();
 	}
 
-	shell_teardown(0);
+	worker_teardown(1, 0);
 	return 0;
 }
