@@ -110,16 +110,22 @@ mkdir -p "$FFS" 2>>"$LOG"
 mount -t functionfs adb "$FFS" 2>>"$LOG" || { log "FAIL mount functionfs"; exit 1; }
 mkdir -p /tmp/bin 2>/dev/null
 cp "$ADBD" /tmp/bin/min_adbd 2>>"$LOG" && chmod +x /tmp/bin/min_adbd
-# RAM shell (net_mode pattern: exec from the bind-mounted SD while musb is
-# active can deadlock — busybox + sh wrapper in tmpfs for the daemon's shells)
+# RAM shell + ALL applets (net_mode pattern completed): exec from the
+# bind-mounted SD while musb is active DEADLOCKS execve (evidence
+# 2026-09-28: builtin echo works, external /bin/uname hangs the child).
+# busybox --install puts every applet (uname, free, id, ls, ...) in tmpfs.
 cp /bin/busybox /tmp/bin/busybox 2>>"$LOG" && chmod +x /tmp/bin/busybox
-echo '#!/tmp/bin/busybox sh' > /tmp/bin/sh
-echo 'export PATH=/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin' >> /tmp/bin/sh
-echo 'exec /tmp/bin/busybox sh "$@"' >> /tmp/bin/sh
-chmod +x /tmp/bin/sh
+/tmp/bin/busybox --install -s /tmp/bin 2>>"$LOG"
+if [ ! -e /tmp/bin/sh ]; then
+    # --install fallback: explicit wrapper
+    echo '#!/tmp/bin/busybox sh' > /tmp/bin/sh
+    echo 'export PATH=/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin' >> /tmp/bin/sh
+    echo 'exec /tmp/bin/busybox sh "$@"' >> /tmp/bin/sh
+    chmod +x /tmp/bin/sh
+fi
 /tmp/bin/min_adbd "$FFS" >> "$LOG" 2>&1 &
 ADBD_PID=$!
-log "min_adbd started pid=$ADBD_PID (ram shell ready)"
+log "min_adbd started pid=$ADBD_PID (ram shell + applets ready)"
 
 # role switch to peripheral
 ORIG_ROLE=$(cat "$ROLE_PATH" 2>/dev/null)

@@ -328,6 +328,10 @@ static int shell_start(const char *service)
 		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
 					 "/tmp/bin/sh" : "/bin/sh";
 		ctrace("pre: exec");
+		/* PATH: RAM applets first — external command execs from the
+		 * bind-mounted SD deadlock with the musb active (2026-09-28
+		 * evidence: builtin echo OK, /bin/uname hung in execve). */
+		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
 		/* v1 raw: no PTY, interactive sh or "sh -c <cmd>" */
 		if (cmd[0] == ':' && cmd[1] != '\0')
 			execl(sh, "sh", "-c", cmd + 1, (char *)NULL);
@@ -502,9 +506,14 @@ static void selftest_exec(const char *tag)
 		dup2(p[1], 2);
 		close(p[1]);
 		close(0);
+		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
+		/* exercise builtin AND an external applet (uname) — the
+		 * v8 selftest only proved builtins */
 		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
 				 "/tmp/bin/sh" : "/bin/sh";
-		execl(sh, "sh", "-c", "echo selftest-ok", (char *)NULL);
+		execl(sh, "sh", "-c",
+		      "echo selftest-ok; /tmp/bin/busybox uname -m",
+		      (char *)NULL);
 		_exit(127);
 	}
 	close(p[1]);
