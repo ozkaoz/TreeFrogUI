@@ -94,8 +94,10 @@ printf 'TreeFrogUI ADB (FunctionFS)\n' > "$G/strings/0x409/product"
 printf 'adb\n' > "$G/configs/c.1/strings/0x409/configuration"
 printf '250\n' > "$G/configs/c.1/MaxPower" 2>/dev/null
 
-# ffs function + config link
-mkdir "$G/functions/ffs.adb" 2>>"$LOG" || log "ffs.adb exists"
+# ffs function + config link (mkdir failure is fatal — e.g. legacy g_ffs
+# built-in (CONFIG_USB_FUNCTIONFS=y) blocks configfs ffs with EBUSY)
+mkdir "$G/functions/ffs.adb" 2>>"$LOG"
+[ -d "$G/functions/ffs.adb" ] || { log "FAIL mkdir ffs.adb (kernel: CONFIG_USB_CONFIGFS_F_FS? legacy FUNCTIONFS off?)"; exit 1; }
 ln -s "$G/functions/ffs.adb" "$G/configs/c.1/ffs.adb" 2>>"$LOG" || { log "FAIL link"; exit 1; }
 log "gadget creado (ff/42/01, 2 bulk eps)"
 
