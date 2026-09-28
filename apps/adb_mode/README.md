@@ -71,11 +71,12 @@ it is the experiment evidence).
   bs=4096 count=2048 | base64'` or an `adb pull` of a rom): observe screen.
 - Every phase: photo/video of the display + ADB_MODE_DEBUG.log.
 
-## Status
+## Status (2026-09-28 — iteration closed)
 
 | Item | State |
 |---|---|
-| min_adbd (source + static mipsel binary) | BUILD PASS (clean `-Wall -Wextra`) |
-| adb_mode.sh / dispatcher `adb.mode` | written — physical pending |
-| Physical overlay test (phases A/B/C) | PENDING — needs Class F deploy authorization |
-| `adb shell` end-to-end | PENDING — physical |
+| **Overlay (the 9-6f experiment question)** | **PASS — the ffs gadget never triggers the AVP blue overlay** (hours of live sessions; NCM reference triggers at ~30s) |
+| Gadget + transport | `adb devices` = R36SX0001 device, stable every boot (Windows: WinUSB inbox match) |
+| Fixed chain (verified on console) | legacy g_ffs EBUSY → strings phase → USB serial → two-write header/payload → stale stream reset |
+| `adb shell` | **OPEN DEFECT** — the worker (static busybox, spawned pre-bind, fed via stdin post-bind) goes mute; 10 theories eliminated experimentally; kernel-side suspect: ported musb (9102) TX-armed state with the server's perpetually-pending IN read. Next diagnostic: /proc/<pid>/wchan of the worker via NCM telnet while the adb session is live |
+| min_adbd v17 (`f75f6eaf`) + busybox-static (`0110be2a`) | BUILD PASS — deployed, final logs pending capture |
