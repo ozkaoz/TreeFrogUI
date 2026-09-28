@@ -35,7 +35,7 @@ that Windows can use without a COM-port terminal.
 Kernel uapi headers (`linux/usb/functionfs.h`, `ch9.h`) come from the MTI
 sysroot (`.../host/mipsel-buildroot-linux-gnu/sysroot/mipsel-r2-hard/`).
 Current binary: `adbd` SHA-256
-`34ecdf09f8c9b858afd14c72b4c25f1fc1e088cfd433dd83dcd928a6c5431922`
+`042b160c95b603ee0e27e00944011634d2abfcc2d97f5767e9dba988d3e6a0ed`
 (611 KB, `ELF 32-bit LSB MIPS32 rel2, statically linked, stripped`).
 
 ## Requirements (platform side)

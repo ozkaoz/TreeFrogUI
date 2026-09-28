@@ -156,10 +156,10 @@ static int have_stream;            /* shell service open */
 static uint32_t local_id = 1;     /* our stream id */
 static uint32_t remote_id;        /* host stream id */
 static pid_t worker_pid = -1;     /* persistent ash worker */
+static int worker_in = -1;         /* daemon -> worker stdin */
 static int worker_out = -1;        /* worker stdout -> daemon */
 static int wrte_outstanding;       /* one in-flight device->host WRTE */
 static char pending_cmd[256];      /* stashed by A_OPEN, run from main loop */
-static int worker_spawn_needed;
 
 /* host->device reassembly stream (host may split packets arbitrarily) */
 static uint8_t in_buf[2 * MAX_PAYLOAD];
@@ -303,7 +303,6 @@ static void worker_teardown(int kill_worker, int send_clse)
 	}
 	have_stream = 0;
 	pending_cmd[0] = '\0';
-	worker_spawn_needed = 0;
 }
 
 static void ctrace(const char *msg)
@@ -315,30 +314,34 @@ static void ctrace(const char *msg)
 	}
 }
 
-/* Called ONLY from the main loop (top-level context). cmd: the -c
- * command string (PROVEN path: the startup selftest runs through the
- * same wrapper with -c and its output flows; interactive ash on a
- * pipe is the frozen variant — do NOT use it). */
-static int worker_spawn(const char *cmd)
+/* Interactive ash worker, spawned ONCE AT STARTUP — before the gadget
+ * binds: the only fork+exec state proven to complete AND run (the
+ * live-gadget state mutes any newly-exec'd process: ash-alive logged
+ * then silence, 2026-09-28 v13/v14 evidence). Commands are fed as
+ * stdin lines; completion detected via the DONE_MARK echoed by the
+ * daemon itself after each command (pump filters it and CLSEs). */
+static int worker_spawn(void)
 {
-	int out_pipe[2];
+	int in_pipe[2], out_pipe[2];
 
-	if (pipe(out_pipe) < 0)
+	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0)
 		return -1;
 	pid_t pid = fork();
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
 		ctrace("worker: pre-exec");
+		close(in_pipe[1]);
 		close(out_pipe[0]);
+		dup2(in_pipe[0], 0);
 		dup2(out_pipe[1], 1);
 		dup2(out_pipe[1], 2);
+		close(in_pipe[0]);
 		close(out_pipe[1]);
-		close(0);
 		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
 		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
 				 "/tmp/bin/sh" : "/bin/sh";
-		execl(sh, "sh", "-c", cmd, (char *)NULL);
+		execl(sh, "sh", (char *)NULL);
 		ctrace("worker: exec FAILED (see errno)");
 		{
 			int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT,
@@ -351,30 +354,132 @@ static int worker_spawn(const char *cmd)
 		}
 		_exit(127);
 	}
+	close(in_pipe[0]);
 	close(out_pipe[1]);
+	worker_in = in_pipe[1];
 	worker_out = out_pipe[0];
 	fcntl(worker_out, F_SETFL, O_NONBLOCK);
 	worker_pid = pid;
-	logmsg("worker pid=%d up (cmd='%s')", pid, cmd);
+	logmsg("worker pid=%d up (startup, interactive)", pid);
 	return 0;
 }
 
-/* forward worker stdout as WRTE (respecting 1-packet flow control) */
+/* forward worker stdout as WRTE (respecting 1-packet flow control).
+ * Scans for the completion marker (echoed by the daemon after every
+ * fed command): everything before it is command output; on marker ->
+ * CLSE (adb shell returns). The worker stays alive for the next OPEN.
+ * Marker may split across reads: the tail is held back while it could
+ * still be a marker prefix. */
+#define DONE_MARK "@@R36SX_DONE@@"
+
 static void pump_worker_out(void)
 {
 	static uint8_t chunk[MAX_PAYLOAD];
+	static uint8_t hold[32];
+	static size_t hold_len;
+	size_t mlen = sizeof(DONE_MARK) - 1;
+
 	if (!have_stream || wrte_outstanding || worker_out < 0)
 		return;
+	/* complete a held-back tail first */
+	if (hold_len) {
+		ssize_t r = read(worker_out, hold + hold_len,
+				 sizeof(hold) - hold_len);
+		if (r < 0) {
+			if (errno == EAGAIN || errno == EINTR)
+				return;
+		}
+		if (r <= 0) {
+			/* EOF/err with a held tail: flush it then teardown */
+			if (send_pkt(A_WRTE, local_id, remote_id, hold,
+				     (uint32_t)hold_len) == 0)
+				wrte_outstanding = 1;
+			hold_len = 0;
+			logmsg("worker eof/err after hold (r=%zd)", r);
+			worker_teardown(0, 1);
+			worker_pid = -1;
+			if (worker_out >= 0) {
+				close(worker_out);
+				worker_out = -1;
+			}
+			return;
+		}
+		hold_len += (size_t)r;
+		uint8_t *m = memmem(hold, hold_len, DONE_MARK, mlen);
+		if (m) {
+			size_t pre = (size_t)(m - hold);
+			/* strip the marker line's leading newline */
+			if (pre > 0 && hold[pre - 1] == '\n')
+				pre--;
+			if (pre && send_pkt(A_WRTE, local_id, remote_id,
+					    hold, (uint32_t)pre) == 0)
+				wrte_outstanding = 1;
+			logmsg("done-marker (held path) pre=%zu", pre);
+			hold_len = 0;
+			worker_teardown(0, 1);
+			return;
+		}
+		/* not a marker: flush the whole hold minus a possible
+		 * partial-marker tail */
+		size_t send_now = hold_len;
+		for (size_t k = 1; k < mlen && k < hold_len; k++) {
+			if (hold[hold_len - k] == DONE_MARK[0] &&
+			    hold_len - k + mlen > hold_len &&
+			    memcmp(hold + hold_len - k, DONE_MARK,
+				   k) == 0) {
+				send_now = hold_len - k;
+				break;
+			}
+		}
+		if (send_now) {
+			if (send_pkt(A_WRTE, local_id, remote_id, hold,
+				     (uint32_t)send_now) == 0)
+				wrte_outstanding = 1;
+			memmove(hold, hold + send_now, hold_len - send_now);
+			hold_len -= send_now;
+		}
+		if (hold_len >= mlen)
+			hold_len = 0; /* impossible marker: drop */
+		return;
+	}
+	/* fresh read */
 	ssize_t r = read(worker_out, chunk, sizeof(chunk));
 	if (r > 0) {
-		int rc = send_pkt(A_WRTE, local_id, remote_id, chunk, (uint32_t)r);
-		logmsg("pump: %zd bytes rc=%d", r, rc);
-		if (rc == 0)
-			wrte_outstanding = 1;
+		size_t len = (size_t)r;
+		uint8_t *m = memmem(chunk, len, DONE_MARK, mlen);
+		if (m) {
+			size_t pre = (size_t)(m - chunk);
+			if (pre > 0 && chunk[pre - 1] == '\n')
+				pre--;
+			if (pre && send_pkt(A_WRTE, local_id, remote_id,
+					    chunk, (uint32_t)pre) == 0)
+				wrte_outstanding = 1;
+			logmsg("done-marker pre=%zu total=%zu", pre, len);
+			hold_len = 0;
+			worker_teardown(0, 1); /* CLSE; worker stays alive */
+			return;
+		}
+		/* hold back a possible partial-marker tail */
+		size_t send_now = len;
+		for (size_t k = 1; k < mlen && k < len; k++) {
+			if (chunk[len - k] == DONE_MARK[0] &&
+			    memcmp(chunk + len - k, DONE_MARK, k) == 0) {
+				send_now = len - k;
+				break;
+			}
+		}
+		if (send_now) {
+			if (send_pkt(A_WRTE, local_id, remote_id, chunk,
+				     (uint32_t)send_now) == 0)
+				wrte_outstanding = 1;
+			logmsg("pump: %zu bytes rc=0", send_now);
+		}
+		if (send_now < len) {
+			hold_len = len - send_now;
+			memcpy(hold, chunk + send_now, hold_len);
+		}
 	} else if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
 		logmsg("worker eof/err (r=%zd errno=%d)", r, errno);
-		/* -c command finished (worker ran `exit`): close the stream;
-		 * the worker is dead — a future OPEN respawns at top level */
 		worker_teardown(0, 1);
 		worker_pid = -1;
 		if (worker_out >= 0) {
@@ -434,7 +539,6 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 				pending_cmd[cl] = '\0';
 				have_stream = 1;
 				wrte_outstanding = 0;
-				worker_spawn_needed = 1;
 				logmsg("OPEN stream (cmd='%s')", pending_cmd);
 				send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 			} else {
@@ -607,18 +711,20 @@ int main(int argc, char **argv)
 	}
 	logmsg("ready: ffs=%s (ff/42/01, 2 bulk eps)", g_dir);
 	selftest_exec("startup");
+	if (worker_spawn() != 0)
+		logmsg("WARN: worker spawn failed — shells will CLSE");
 
 	for (;;) {
-		/* TOP-LEVEL worker spawn — the ONLY fork+exec context
-		 * that reliably completes on this console (see worker note).
-		 * Command goes via -c argv (proven path); interactive streams
-		 * (no command) are rejected for now — interactive ash on a
-		 * pipe does not run on this console. */
-		if (worker_spawn_needed && worker_pid < 0) {
-			worker_spawn_needed = 0;
-			if (pending_cmd[0] && worker_spawn(pending_cmd) == 0)
-				logmsg("worker running");
+		/* TOP-LEVEL command feed: pure pipe I/O to the startup
+		 * worker (no execs in the live-gadget state, ever). */
+		if (have_stream && pending_cmd[0] && worker_in >= 0) {
+			xwrite(worker_in, "(", 1);
+			xwrite(worker_in, pending_cmd, strlen(pending_cmd));
+			xwrite(worker_in, ")\necho ", 7);
+			xwrite(worker_in, DONE_MARK, sizeof(DONE_MARK) - 1);
+			xwrite(worker_in, "\n", 1);
 			pending_cmd[0] = '\0';
+			logmsg("worker fed");
 		}
 		int n = 0;
 		pfd[n].fd = ep0_fd;
