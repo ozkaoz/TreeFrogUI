@@ -105,14 +105,21 @@ mkdir "$G/functions/ffs.adb" 2>>"$LOG"
 ln -s "$G/functions/ffs.adb" "$G/configs/c.1/ffs.adb" 2>>"$LOG" || { log "FAIL link"; exit 1; }
 log "gadget creado (ff/42/01, 2 bulk eps)"
 
-# functionfs mount + daemon (RAM copy — avoid SD reads during USB activity)
+# functionfs mount + daemon (RAM copies — avoid SD reads during USB activity)
 mkdir -p "$FFS" 2>>"$LOG"
 mount -t functionfs adb "$FFS" 2>>"$LOG" || { log "FAIL mount functionfs"; exit 1; }
 mkdir -p /tmp/bin 2>/dev/null
 cp "$ADBD" /tmp/bin/min_adbd 2>>"$LOG" && chmod +x /tmp/bin/min_adbd
+# RAM shell (net_mode pattern: exec from the bind-mounted SD while musb is
+# active can deadlock — busybox + sh wrapper in tmpfs for the daemon's shells)
+cp /bin/busybox /tmp/bin/busybox 2>>"$LOG" && chmod +x /tmp/bin/busybox
+echo '#!/tmp/bin/busybox sh' > /tmp/bin/sh
+echo 'export PATH=/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin' >> /tmp/bin/sh
+echo 'exec /tmp/bin/busybox sh "$@"' >> /tmp/bin/sh
+chmod +x /tmp/bin/sh
 /tmp/bin/min_adbd "$FFS" >> "$LOG" 2>&1 &
 ADBD_PID=$!
-log "min_adbd started pid=$ADBD_PID"
+log "min_adbd started pid=$ADBD_PID (ram shell ready)"
 
 # role switch to peripheral
 ORIG_ROLE=$(cat "$ROLE_PATH" 2>/dev/null)

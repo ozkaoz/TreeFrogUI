@@ -310,11 +310,17 @@ static int shell_start(const char *service)
 		dup2(out_pipe[1], 2);
 		close(in_pipe[0]);
 		close(out_pipe[1]);
-		/* v1 raw: no PTY, interactive sh or "sh -c <cmd>" */
+		/* v1 raw: no PTY, interactive sh or "sh -c <cmd>".
+		 * Prefer the RAM shell wrapper (/tmp/bin/sh — busybox copy,
+		 * net_mode's documented pattern: exec from the bind-mounted
+		 * SD while the musb is active can deadlock); /bin/sh as
+		 * fallback. */
+		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
+					 "/tmp/bin/sh" : "/bin/sh";
 		if (cmd[0] == ':' && cmd[1] != '\0')
-			execl("/bin/sh", "sh", "-c", cmd + 1, (char *)NULL);
+			execl(sh, "sh", "-c", cmd + 1, (char *)NULL);
 		else
-			execl("/bin/sh", "sh", (char *)NULL);
+			execl(sh, "sh", (char *)NULL);
 		_exit(127);
 	}
 	close(in_pipe[0]);
@@ -339,7 +345,9 @@ static void pump_shell_out(void)
 		return;
 	ssize_t r = read(stdout_r, chunk, sizeof(chunk));
 	if (r > 0) {
-		if (send_pkt(A_WRTE, local_id, remote_id, chunk, (uint32_t)r) == 0)
+		int rc = send_pkt(A_WRTE, local_id, remote_id, chunk, (uint32_t)r);
+		logmsg("pump: %zd bytes -> WRTE rc=%d", r, rc);
+		if (rc == 0)
 			wrte_outstanding = 1;
 	} else if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
 		logmsg("shell eof/err (r=%zd errno=%d)", r, errno);
