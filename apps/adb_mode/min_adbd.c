@@ -51,6 +51,9 @@
 #define A_VERSION 0x01000001U
 #define MAX_PAYLOAD 4096U
 
+/* child-side trace target (pre/post-exec instrumentation) */
+#define ADB_LOG "/mnt/sdcard/ADB_MODE_DEBUG.log"
+
 /* CNXN payload: identity + features. "shell" only (v1 raw) on purpose. */
 #define CNXN_PAYLOAD "device::ro.product.name=R36SX;ro.product.model=R36SX V2.6;" \
 	"ro.serialno=R36SX0001;ro.build.tags=test-keys;features=shell"
@@ -294,6 +297,7 @@ static int shell_start(const char *service)
 {
 	int in_pipe[2], out_pipe[2];
 	const char *cmd = service + 5; /* skip "shell"; ":cmd" or "" */
+	int trace;
 
 	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0)
 		return -1;
@@ -302,6 +306,13 @@ static int shell_start(const char *service)
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
+		/* child pre-exec trace: write to the log BEFORE touching
+		 * stdio — if the child dies in exec, the log tells us */
+		trace = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		if (trace >= 0) {
+			dprintf(trace, "child[%d]: pre-exec\n", (int)getpid());
+			close(trace);
+		}
 		prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
 		close(in_pipe[1]);
 		close(out_pipe[0]);
@@ -321,6 +332,12 @@ static int shell_start(const char *service)
 			execl(sh, "sh", "-c", cmd + 1, (char *)NULL);
 		else
 			execl(sh, "sh", (char *)NULL);
+		trace = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		if (trace >= 0) {
+			dprintf(trace, "child[%d]: exec FAILED errno=%d\n",
+				(int)getpid(), errno);
+			close(trace);
+		}
 		_exit(127);
 	}
 	close(in_pipe[0]);
@@ -357,6 +374,8 @@ static void pump_shell_out(void)
 
 /* ---------------- host->device packet handling ---------------- */
 
+static void selftest_exec(const char *tag);
+
 static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 			    uint32_t len)
 {
@@ -390,6 +409,7 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		svc[sl] = '\0';
 		if (!have_stream && strncmp(svc, "shell", 5) == 0) {
 			remote_id = h->arg0;
+			selftest_exec("open");
 			if (shell_start(svc) == 0)
 				send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 			else
@@ -446,6 +466,70 @@ drop:
 
 /* ---------------- main ---------------- */
 
+static volatile sig_atomic_t g_alarm_fired;
+static void alarm_handler(int sig)
+{
+	(void)sig;
+	g_alarm_fired = 1;
+}
+
+/*
+ * Startup self-test: fork + exec(RAM sh) + pipe in the daemon's own
+ * context. Evidence 2026-09-28: shells fork (pid logged) but never write
+ * to the pipe nor exit — the child freezes. This tells us whether
+ * fork+exec completes HERE. 3 s alarm guard; logs the outcome either way.
+ */
+static void selftest_exec(const char *tag)
+{
+	int p[2];
+	char buf[80];
+	ssize_t n;
+
+	if (pipe(p) < 0) {
+		logmsg("%s selftest: pipe FAIL errno=%d", tag, errno);
+		return;
+	}
+	pid_t pid = fork();
+	if (pid < 0) {
+		logmsg("%s selftest: fork FAIL errno=%d", tag, errno);
+		return;
+	}
+	if (pid == 0) {
+		close(p[0]);
+		dup2(p[1], 1);
+		dup2(p[1], 2);
+		close(p[1]);
+		close(0);
+		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
+				 "/tmp/bin/sh" : "/bin/sh";
+		execl(sh, "sh", "-c", "echo selftest-ok", (char *)NULL);
+		_exit(127);
+	}
+	close(p[1]);
+	signal(SIGALRM, alarm_handler);
+	g_alarm_fired = 0;
+	alarm(3);
+	n = read(p[0], buf, sizeof(buf) - 1);
+	int saved = errno;
+	alarm(0);
+	signal(SIGALRM, SIG_DFL);
+	if (g_alarm_fired || (n < 0 && saved == EINTR)) {
+		logmsg("%s selftest: STUCK (n=%zd) — fork+exec does not complete in daemon context",
+		       tag, n);
+	} else if (n > 0) {
+		size_t e = (size_t)n < sizeof(buf) - 1 ? (size_t)n : sizeof(buf) - 1;
+		while (e > 0 && (buf[e - 1] == '\n' || buf[e - 1] == '\r'))
+			e--;
+		buf[e] = '\0';
+		logmsg("%s selftest: fork+exec OK — '%s'", tag, buf);
+	} else {
+		logmsg("%s selftest: EOF without output (n=%zd errno=%d)",
+		       tag, n, saved);
+	}
+	close(p[0]);
+	waitpid(pid, NULL, 0);
+}
+
 int main(int argc, char **argv)
 {
 	char path[256];
@@ -490,6 +574,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	logmsg("ready: ffs=%s (ff/42/01, 2 bulk eps)", g_dir);
+	selftest_exec("startup");
 
 	for (;;) {
 		int n = 0;
