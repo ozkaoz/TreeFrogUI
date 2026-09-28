@@ -91,6 +91,10 @@ printf '0x0200\n' > "$G/bcdUSB"
 mkdir -p "$G/strings/0x409" "$G/configs/c.1/strings/0x409" 2>/dev/null
 printf 'TreeFrogUI\n' > "$G/strings/0x409/manufacturer"
 printf 'TreeFrogUI ADB (FunctionFS)\n' > "$G/strings/0x409/product"
+# adb REQUIRES the USB serial string (usb_windows.cpp "cannot get serial
+# number" -> usb_cleanup_handle -> device dropped; evidence 2026-09-27).
+# Must match the daemon's CNXN ro.serialno.
+printf 'R36SX0001\n' > "$G/strings/0x409/serialnumber"
 printf 'adb\n' > "$G/configs/c.1/strings/0x409/configuration"
 printf '250\n' > "$G/configs/c.1/MaxPower" 2>/dev/null
 
