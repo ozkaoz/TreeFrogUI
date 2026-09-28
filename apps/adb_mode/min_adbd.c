@@ -160,6 +160,7 @@ static int worker_in = -1;         /* daemon -> worker stdin */
 static int worker_out = -1;        /* worker stdout -> daemon */
 static int wrte_outstanding;       /* one in-flight device->host WRTE */
 static char pending_cmd[256];      /* stashed by A_OPEN, run from main loop */
+static int diag_ticks;             /* wchan self-diagnostics remaining */
 
 /* host->device reassembly stream (host may split packets arbitrarily) */
 static uint8_t in_buf[2 * MAX_PAYLOAD];
@@ -312,6 +313,50 @@ static void ctrace(const char *msg)
 		dprintf(t, "child[%d]: %s\n", (int)getpid(), msg);
 		close(t);
 	}
+}
+
+/* self-diagnostics: sample the worker's /proc state into the log.
+ * The daemon itself runs fine in the live state, and /proc is RAM —
+ * this is the NCM-free way to see WHY the worker is mute. */
+static void worker_diag(int tick)
+{
+	char path[64], buf[512], wbuf[80];
+	ssize_t r;
+	int fd;
+
+	if (worker_pid <= 0)
+		return;
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)worker_pid);
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		logmsg("diag t=%d: /proc/%d/stat gone (worker dead?)",
+		       tick, (int)worker_pid);
+		return;
+	}
+	r = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (r <= 0)
+		return;
+	buf[r] = '\0';
+	/* state = char after the last ') ' of the comm field */
+	char *close_paren = strrchr(buf, ')');
+	char state = (close_paren && close_paren[1] == ' ') ?
+			     close_paren[2] : '?';
+	wbuf[0] = '\0';
+	snprintf(path, sizeof(path), "/proc/%d/wchan", (int)worker_pid);
+	fd = open(path, O_RDONLY);
+	if (fd >= 0) {
+		r = read(fd, wbuf, sizeof(wbuf) - 1);
+		close(fd);
+		if (r <= 0)
+			snprintf(wbuf, sizeof(wbuf), "<unreadable>");
+		else
+			wbuf[r < (ssize_t)sizeof(wbuf) - 1 ?
+				     r : (ssize_t)sizeof(wbuf) - 1] = '\0';
+	} else {
+		snprintf(wbuf, sizeof(wbuf), "<no wchan>");
+	}
+	logmsg("diag t=%d state=%c wchan=%s", tick, state, wbuf);
 }
 
 /* Interactive ash worker, spawned ONCE AT STARTUP — before the gadget
@@ -721,12 +766,15 @@ int main(int argc, char **argv)
 		 * v16 fed `(cmd)` and stayed mute); builtins must run
 		 * fork-free. */
 		if (have_stream && pending_cmd[0] && worker_in >= 0) {
-			xwrite(worker_in, pending_cmd, strlen(pending_cmd));
-			xwrite(worker_in, "\necho ", 6);
-			xwrite(worker_in, DONE_MARK, sizeof(DONE_MARK) - 1);
-			xwrite(worker_in, "\n", 1);
+			int rc = xwrite(worker_in, pending_cmd,
+					strlen(pending_cmd));
+			rc |= xwrite(worker_in, "\necho ", 6);
+			rc |= xwrite(worker_in, DONE_MARK,
+				      sizeof(DONE_MARK) - 1);
+			rc |= xwrite(worker_in, "\n", 1);
 			pending_cmd[0] = '\0';
-			logmsg("worker fed");
+			logmsg("worker fed rc=%d", rc);
+			diag_ticks = 15;
 		}
 		int n = 0;
 		pfd[n].fd = ep0_fd;
@@ -742,12 +790,18 @@ int main(int argc, char **argv)
 			pfd[n].events = POLLIN;
 			n++;
 		}
-		int rc = poll(pfd, (nfds_t)n, -1);
+		int timeout = diag_ticks > 0 ? 1000 : -1;
+		int rc = poll(pfd, (nfds_t)n, timeout);
 		if (rc < 0) {
 			if (errno == EINTR)
 				continue;
 			logmsg("poll: %s", strerror(errno));
 			break;
+		}
+		if (rc == 0 && diag_ticks > 0) {
+			worker_diag(16 - diag_ticks);
+			diag_ticks--;
+			continue;
 		}
 
 		if (pfd[0].revents & (POLLERR | POLLHUP)) {
