@@ -293,11 +293,19 @@ static void shell_teardown(int send_clse)
 	have_stream = 0;
 }
 
+static void ctrace(const char *msg)
+{
+	int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
+	if (t >= 0) {
+		dprintf(t, "child[%d]: %s\n", (int)getpid(), msg);
+		close(t);
+	}
+}
+
 static int shell_start(const char *service)
 {
 	int in_pipe[2], out_pipe[2];
 	const char *cmd = service + 5; /* skip "shell"; ":cmd" or "" */
-	int trace;
 
 	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0)
 		return -1;
@@ -306,14 +314,10 @@ static int shell_start(const char *service)
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
-		/* child pre-exec trace: write to the log BEFORE touching
-		 * stdio — if the child dies in exec, the log tells us */
-		trace = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
-		if (trace >= 0) {
-			dprintf(trace, "child[%d]: pre-exec\n", (int)getpid());
-			close(trace);
-		}
-		prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+		/* NOTE: no prctl(PDEATHSIG) — prime suspect for the pre-exec
+		 * freeze (the selftest child, which never calls prctl, always
+		 * completes); teardown SIGKILLs the shell anyway. */
+		ctrace("pre: closes/dup2");
 		close(in_pipe[1]);
 		close(out_pipe[0]);
 		dup2(in_pipe[0], 0);
@@ -321,22 +325,20 @@ static int shell_start(const char *service)
 		dup2(out_pipe[1], 2);
 		close(in_pipe[0]);
 		close(out_pipe[1]);
-		/* v1 raw: no PTY, interactive sh or "sh -c <cmd>".
-		 * Prefer the RAM shell wrapper (/tmp/bin/sh — busybox copy,
-		 * net_mode's documented pattern: exec from the bind-mounted
-		 * SD while the musb is active can deadlock); /bin/sh as
-		 * fallback. */
 		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
 					 "/tmp/bin/sh" : "/bin/sh";
+		ctrace("pre: exec");
+		/* v1 raw: no PTY, interactive sh or "sh -c <cmd>" */
 		if (cmd[0] == ':' && cmd[1] != '\0')
 			execl(sh, "sh", "-c", cmd + 1, (char *)NULL);
 		else
 			execl(sh, "sh", (char *)NULL);
-		trace = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
-		if (trace >= 0) {
-			dprintf(trace, "child[%d]: exec FAILED errno=%d\n",
+		ctrace("exec FAILED — see errno line");
+		int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		if (t >= 0) {
+			dprintf(t, "child[%d]: exec errno=%d\n",
 				(int)getpid(), errno);
-			close(trace);
+			close(t);
 		}
 		_exit(127);
 	}
