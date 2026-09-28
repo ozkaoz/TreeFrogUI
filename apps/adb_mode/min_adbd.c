@@ -331,6 +331,7 @@ static int worker_spawn(void)
 	if (pid < 0)
 		return -1;
 	if (pid == 0) {
+		ctrace("worker: pre-exec");
 		close(in_pipe[1]);
 		close(out_pipe[0]);
 		dup2(in_pipe[0], 0);
@@ -616,6 +617,7 @@ int main(int argc, char **argv)
 					strlen(pending_cmd));
 				xwrite(worker_in, "\nexit\n", 6);
 				pending_cmd[0] = '\0';
+				logmsg("worker fed");
 			}
 		}
 		int n = 0;
