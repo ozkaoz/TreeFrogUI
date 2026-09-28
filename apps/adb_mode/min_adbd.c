@@ -343,7 +343,16 @@ static int worker_spawn(void)
 		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
 				 "/tmp/bin/sh" : "/bin/sh";
 		execl(sh, "sh", (char *)NULL);
-		ctrace("worker: exec FAILED");
+		ctrace("worker: exec FAILED (see errno)");
+		{
+			int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT,
+				     0644);
+			if (t >= 0) {
+				dprintf(t, "child[%d]: exec errno=%d\n",
+					(int)getpid(), errno);
+				close(t);
+			}
+		}
 		_exit(127);
 	}
 	close(in_pipe[0]);

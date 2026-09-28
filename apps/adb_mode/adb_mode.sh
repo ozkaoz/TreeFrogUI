@@ -116,8 +116,10 @@ cp "$ADBD" /tmp/bin/min_adbd 2>>"$LOG" && chmod +x /tmp/bin/min_adbd
 # busybox --install puts every applet (uname, free, id, ls, ...) in tmpfs.
 cp /bin/busybox /tmp/bin/busybox 2>>"$LOG" && chmod +x /tmp/bin/busybox
 /tmp/bin/busybox --install -s /tmp/bin 2>>"$LOG"
-# FORCE the wrapper script over any --install symlink: it carries the
-# post-exec alive-proof (v12 instrumentation) + the RAM-first PATH.
+# Wrapper script with the post-exec alive-proof. CRITICAL: rm the
+# --install SYMLINK first — `> /tmp/bin/sh` on a symlink CLOBBERS
+# /tmp/bin/busybox with script text (v12 bug: every exec -> ENOEXEC).
+rm -f /tmp/bin/sh
 echo '#!/tmp/bin/busybox sh' > /tmp/bin/sh
 echo 'echo "ash-alive pid=$$ args=$*" >> /mnt/sdcard/ADB_MODE_DEBUG.log' >> /tmp/bin/sh
 echo 'export PATH=/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin' >> /tmp/bin/sh
