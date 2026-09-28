@@ -230,25 +230,40 @@ static int xwrite(int fd, const void *buf, size_t n)
 	return 0;
 }
 
-/* one ADB packet -> single ffs write (header+payload in one USB request) */
+/* Send one ADB packet as TWO separate ffs writes = TWO USB transfers
+ * (header, then payload) — same as real adbd (daemon/usb.cpp Write():
+ * header block + payload blocks; usb_ffs zero_mask ZLP). adb's Windows
+ * backend reads each header with a chunked read that REQUIRES exactly
+ * 24 bytes (transport_usb.cpp UsbReadMessage: n != 24 -> connection
+ * terminated). One combined write delivers header+payload in a single
+ * USB transfer and adb drops the device (root cause of the 2026-09-27
+ * CNXN loop). Payload sized as a multiple of the HS maxpacket (512)
+ * additionally needs a ZLP so the transfer boundary is explicit. */
 static int send_pkt(uint32_t cmd, uint32_t arg0, uint32_t arg1,
 		    const void *data, uint32_t len)
 {
-	uint8_t pkt[24 + MAX_PAYLOAD];
-	struct amessage *h = (struct amessage *)pkt;
+	uint8_t hdr[24];
+	struct amessage *h = (struct amessage *)hdr;
 
 	if (len > MAX_PAYLOAD)
 		return -1;
-	memset(pkt, 0, sizeof(pkt));
+	memset(hdr, 0, sizeof(hdr));
 	h->command = cmd;
 	h->arg0 = arg0;
 	h->arg1 = arg1;
 	h->data_length = len;
 	h->data_check = len ? crc32_buf(data, len) : 0; /* payload-only crc */
 	h->magic = cmd ^ 0xffffffffU;
-	if (len && data)
-		memcpy(pkt + 24, data, len);
-	return xwrite(ep_in_fd, pkt, 24 + len);
+
+	if (xwrite(ep_in_fd, hdr, sizeof(hdr)) < 0)
+		return -1;
+	if (len) {
+		if (xwrite(ep_in_fd, data, len) < 0)
+			return -1;
+		if ((len & 511) == 0 && xwrite(ep_in_fd, hdr, 0) < 0)
+			return -1; /* ZLP for maxpacket-multiple payloads */
+	}
+	return 0;
 }
 
 /* ---------------- shell service ---------------- */

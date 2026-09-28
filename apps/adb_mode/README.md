@@ -19,7 +19,7 @@ that Windows can use without a COM-port terminal.
 
 | File | What |
 |---|---|
-| `min_adbd.c` | Minimal ADB daemon: ffs V2 descriptors (ff/42/01, 2 bulk EPs) + **empty STRINGS block (the ffs state machine requires the strings phase before ep1/ep2 files exist — f_fs.c:330-395; a zero-count block is accepted when descriptors reference no strings, f_fs.c:2600)**, CNXN (non-secure, no AUTH), `shell:` service only (v1 raw — we advertise `features=shell` so the host won't negotiate shell_v2), one-stream flow control (1 outstanding WRTE), everything else CLSE |
+| `min_adbd.c` | Minimal ADB daemon: ffs V2 descriptors (ff/42/01, 2 bulk EPs) + **empty STRINGS block (the ffs state machine requires the strings phase before ep1/ep2 files exist — f_fs.c:330-395; a zero-count block is accepted when descriptors reference no strings, f_fs.c:2600)**, CNXN (non-secure, no AUTH), `shell:` service only (v1 raw — we advertise `features=shell` so the host won't negotiate shell_v2), one-stream flow control (1 outstanding WRTE), everything else CLSE. **Each packet is sent as TWO separate USB transfers (24-byte header write + payload write + ZLP when payload is a 512 multiple) exactly like real adbd (daemon/usb.cpp Write) — adb's Windows backend requires an exactly-24-byte header chunk (transport_usb.cpp UsbReadMessage `n != 24` → connection terminated; root cause of the 2026-09-27 CNXN retry loop)** |
 | `adbd` | Prebuilt static MIPS32r2 binary — rebuild below |
 | `adb_mode.sh` | Console side: configfs gadget `adb_ffs` (0x18d1:0x4EE2), ffs mount, daemon launch (RAM copy), role switch, **retrying** UDC bind (the daemon must claim ep0/ep1/ep2 first), blocking session with B-button/cable exit, full teardown on `stop` |
 | `deploy_adb_mode.sh` | SD installer: scripts + binary + dispatcher patch + `adb.mode` flag |
@@ -35,7 +35,7 @@ that Windows can use without a COM-port terminal.
 Kernel uapi headers (`linux/usb/functionfs.h`, `ch9.h`) come from the MTI
 sysroot (`.../host/mipsel-buildroot-linux-gnu/sysroot/mipsel-r2-hard/`).
 Current binary: `adbd` SHA-256
-`72784bfb5ce8171f3c7e318106f174b1c02d3a1691c28a48dd4808ba84277bd9`
+`eb005c8505b9abd7026c8dd7ad72a529e16569fdc7b039d0dc938430e248e2c4`
 (611 KB, `ELF 32-bit LSB MIPS32 rel2, statically linked, stripped`).
 
 ## Requirements (platform side)
