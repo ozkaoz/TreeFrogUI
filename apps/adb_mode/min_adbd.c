@@ -162,7 +162,8 @@ static int worker_out = -1;        /* worker stdout -> daemon */
 static int wrte_outstanding;       /* one in-flight device->host WRTE */
 static char pending_cmd[256];      /* stashed by A_OPEN, run from main loop */
 static int diag_ticks;
-static int heartbeats;             /* wchan self-diagnostics remaining */
+static int heartbeats;
+static volatile sig_atomic_t g_exit; /* set by the ep0 thread on UNBIND */             /* wchan self-diagnostics remaining */
 
 /* host->device reassembly stream (host may split packets arbitrarily) */
 static uint8_t in_buf[2 * MAX_PAYLOAD];
@@ -495,8 +496,12 @@ static void pump_worker_out(void)
 	static size_t hold_len;
 	size_t mlen = sizeof(DONE_MARK) - 1;
 
-	if (!have_stream || wrte_outstanding || worker_out < 0)
+	pthread_mutex_lock(&q_mutex);
+	if (!have_stream || wrte_outstanding || worker_out < 0) {
+		pthread_mutex_unlock(&q_mutex);
 		return;
+	}
+	pthread_mutex_unlock(&q_mutex);
 	/* complete a held-back tail first */
 	if (hold_len) {
 		ssize_t r = read(worker_out, hold + hold_len,
@@ -509,7 +514,7 @@ static void pump_worker_out(void)
 			/* EOF/err with a held tail: flush it then teardown */
 			if (send_pkt(A_WRTE, local_id, remote_id, hold,
 				     (uint32_t)hold_len) == 0)
-				wrte_outstanding = 1;
+				{ pthread_mutex_lock(&q_mutex); wrte_outstanding = 1; pthread_mutex_unlock(&q_mutex); }
 			hold_len = 0;
 			logmsg("worker eof/err after hold (r=%zd)", r);
 			worker_teardown(0, 1);
@@ -529,7 +534,7 @@ static void pump_worker_out(void)
 				pre--;
 			if (pre && send_pkt(A_WRTE, local_id, remote_id,
 					    hold, (uint32_t)pre) == 0)
-				wrte_outstanding = 1;
+				{ pthread_mutex_lock(&q_mutex); wrte_outstanding = 1; pthread_mutex_unlock(&q_mutex); }
 			logmsg("done-marker (held path) pre=%zu", pre);
 			hold_len = 0;
 			worker_teardown(0, 1);
@@ -550,7 +555,7 @@ static void pump_worker_out(void)
 		if (send_now) {
 			if (send_pkt(A_WRTE, local_id, remote_id, hold,
 				     (uint32_t)send_now) == 0)
-				wrte_outstanding = 1;
+				{ pthread_mutex_lock(&q_mutex); wrte_outstanding = 1; pthread_mutex_unlock(&q_mutex); }
 			memmove(hold, hold + send_now, hold_len - send_now);
 			hold_len -= send_now;
 		}
@@ -569,7 +574,7 @@ static void pump_worker_out(void)
 				pre--;
 			if (pre && send_pkt(A_WRTE, local_id, remote_id,
 					    chunk, (uint32_t)pre) == 0)
-				wrte_outstanding = 1;
+				{ pthread_mutex_lock(&q_mutex); wrte_outstanding = 1; pthread_mutex_unlock(&q_mutex); }
 			logmsg("done-marker pre=%zu total=%zu", pre, len);
 			hold_len = 0;
 			worker_teardown(0, 1); /* CLSE; worker stays alive */
@@ -587,7 +592,7 @@ static void pump_worker_out(void)
 		if (send_now) {
 			if (send_pkt(A_WRTE, local_id, remote_id, chunk,
 				     (uint32_t)send_now) == 0)
-				wrte_outstanding = 1;
+				{ pthread_mutex_lock(&q_mutex); wrte_outstanding = 1; pthread_mutex_unlock(&q_mutex); }
 			logmsg("pump: %zu bytes rc=0", send_now);
 		}
 		if (send_now < len) {
@@ -625,8 +630,7 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		}
 		send_pkt(A_CNXN, A_VERSION, MAX_PAYLOAD, CNXN_PAYLOAD,
 			 (uint32_t)strlen(CNXN_PAYLOAD));
-		break;
-	case A_AUTH:
+		break;	case A_AUTH:
 		/* non-secure device: re-assert connection identity */
 		send_pkt(A_CNXN, A_VERSION, MAX_PAYLOAD, CNXN_PAYLOAD,
 			 (uint32_t)strlen(CNXN_PAYLOAD));
@@ -644,10 +648,10 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		if (!have_stream && strncmp(svc, "shell", 5) == 0) {
 			remote_id = h->arg0;
 			/* "-c command" only: "shell:cmd" -> stash; the main
-			 * loop spawns via -c argv (proven). Interactive
-			 * "shell:" (no command) -> CLSE (unsupported: ash
-			 * interactive on a pipe is the frozen variant). */
+			 * loop feeds it to the startup worker. Interactive
+			 * "shell:" (no command) -> CLSE (unsupported here). */
 			if (svc[5] == ':' && svc[6] != '\0') {
+				pthread_mutex_lock(&q_mutex);
 				size_t cl = strlen(svc + 6);
 				if (cl >= sizeof(pending_cmd))
 					cl = sizeof(pending_cmd) - 1;
@@ -655,6 +659,7 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 				pending_cmd[cl] = '\0';
 				have_stream = 1;
 				wrte_outstanding = 0;
+				pthread_mutex_unlock(&q_mutex);
 				logmsg("OPEN stream (cmd='%s')", pending_cmd);
 				send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 			} else {
@@ -668,9 +673,10 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		break;
 	}
 	case A_OKAY:
+		pthread_mutex_lock(&q_mutex);
 		wrte_outstanding = 0;
-		pump_worker_out();
-		break;
+		pthread_mutex_unlock(&q_mutex);
+		break; /* the main-loop pump picks it up on its next tick */
 	case A_WRTE:
 		/* -c only: no interactive stdin. Swallow (OKAY keeps the
 		 * flow control sane) — nothing to forward to. */
@@ -782,6 +788,58 @@ static void selftest_exec(const char *tag)
 	waitpid(pid, NULL, 0);
 }
 
+/* ---------------- ffs-isolation threads (v24) ----------------
+ * ROOT CAUSE (closed): the vendor f_fs ignores O_NONBLOCK in BOTH
+ * directions — ANY syscall on the ffs fds can block indefinitely.
+ * Architecture: every ffs fd is owned by a dedicated thread that IS
+ * allowed to block (reader/writer/ep0); the main loop only touches
+ * pipes/procfs/usleep (well-behaved). The protocol brain can never
+ * be frozen by the USB layer again. */
+
+static void *ep0_thread(void *arg)
+{
+	(void)arg;
+	struct usb_functionfs_event ev;
+	for (;;) {
+		ssize_t r = read(ep0_fd, &ev, sizeof(ev)); /* blocking OK */
+		if (r != (ssize_t)sizeof(ev))
+			break;
+		logmsg("ffs event type=%d", (int)ev.type);
+		if (ev.type == FUNCTIONFS_UNBIND) {
+			g_exit = 1;
+			break;
+		}
+	}
+	logmsg("ep0 thread done");
+	return NULL;
+}
+
+/* the ONLY toucher of ep_out_fd: blocking host->device reads */
+static void *reader_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		ssize_t r = read(ep_out_fd, in_buf + in_len,
+				 sizeof(in_buf) - in_len); /* blocking OK */
+		if (r < 0) {
+			if (errno == EINTR)
+				continue;
+			logmsg("ep_out read: %s", strerror(errno));
+			g_exit = 1;
+			break;
+		}
+		if (r == 0) {
+			logmsg("ep_out EOF");
+			g_exit = 1;
+			break;
+		}
+		in_len += (size_t)r;
+		process_in_stream();
+	}
+	logmsg("reader thread done");
+	return NULL;
+}
+
 int main(int argc, char **argv)
 {
 	char path[256];
@@ -837,62 +895,41 @@ int main(int argc, char **argv)
 	if (worker_spawn() != 0)
 		logmsg("WARN: worker spawn failed — shells will CLSE");
 
-	pthread_t wth;
+	pthread_t wth, rth, eth;
 	if (pthread_create(&wth, NULL, writer_thread, NULL) != 0)
 		logmsg("WARN: writer thread create failed");
+	if (pthread_create(&rth, NULL, reader_thread, NULL) != 0)
+		logmsg("WARN: reader thread create failed");
+	if (pthread_create(&eth, NULL, ep0_thread, NULL) != 0)
+		logmsg("WARN: ep0 thread create failed");
+	logmsg("threads up (writer/reader/ep0)");
 
 	for (;;) {
+		if (g_exit)
+			break;
 
-		/* WATCHER-STYLE LOOP (no poll()): this console's vendor
-		 * kernel never fires poll()'s hrtimer timeout (v18-v21
-		 * evidence: 1000ms poll timeouts never returned; the
-		 * exit_watcher's usleep cycles work flawlessly). Every fd
-		 * is nonblocking; usleep(10ms) paces the spin. */
-
-		/* ep0: drain ffs events nonblocking */
-		for (;;) {
-			struct usb_functionfs_event ev;
-			ssize_t r = read(ep0_fd, &ev, sizeof(ev));
-			if (r != (ssize_t)sizeof(ev))
-				break;
-			logmsg("ffs event type=%d", (int)ev.type);
-		}
-
-		/* ep_out: host->device stream, nonblocking */
-		for (;;) {
-			ssize_t r = read(ep_out_fd, in_buf + in_len,
-					 sizeof(in_buf) - in_len);
-			if (r < 0) {
-				if (errno != EAGAIN && errno != EINTR) {
-					logmsg("ep_out read: %s",
-					       strerror(errno));
-					goto out_dead;
-				}
-				break;
-			}
-			if (r == 0) {
-				logmsg("ep_out EOF — exiting");
-				goto out_dead;
-			}
-			in_len += (size_t)r;
-			process_in_stream();
-		}
-
-		/* feed the worker if a command is pending (pipe I/O) */
-		if (have_stream && pending_cmd[0] && worker_in >= 0) {
-			int rc = xwrite(worker_in, pending_cmd,
-					strlen(pending_cmd));
+		/* feed the worker if a command is pending (pipe I/O only) */
+		pthread_mutex_lock(&q_mutex);
+		int do_feed = have_stream && pending_cmd[0] &&
+			      worker_in >= 0;
+		pthread_mutex_unlock(&q_mutex);
+		if (do_feed) {
+			pthread_mutex_lock(&q_mutex);
+			char cmd[256];
+			memcpy(cmd, pending_cmd, sizeof(cmd));
+			pending_cmd[0] = '\0';
+			pthread_mutex_unlock(&q_mutex);
+			int rc = xwrite(worker_in, cmd, strlen(cmd));
 			rc |= xwrite(worker_in, "\necho ", 6);
 			rc |= xwrite(worker_in, DONE_MARK,
 				      sizeof(DONE_MARK) - 1);
 			rc |= xwrite(worker_in, "\n", 1);
-			pending_cmd[0] = '\0';
 			logmsg("worker fed rc=%d", rc);
 			diag_ticks = 15;
 			heartbeats = 15;
 		}
 
-		/* worker output pump (nonblocking) */
+		/* worker output pump (pipe reads — well-behaved fds only) */
 		pump_worker_out();
 
 		/* diagnostics sampling on the working timer (usleep) */
@@ -907,7 +944,7 @@ int main(int argc, char **argv)
 
 		usleep(10000);
 	}
-out_dead:
+	logmsg("main loop done (g_exit=%d)", (int)g_exit);
 	worker_teardown(1, 0);
 	return 0;
 }
