@@ -577,7 +577,28 @@ static void pump_worker_out(void)
 				{ pthread_mutex_lock(&q_mutex); wrte_outstanding = 1; pthread_mutex_unlock(&q_mutex); }
 			logmsg("done-marker pre=%zu total=%zu", pre, len);
 			hold_len = 0;
-			worker_teardown(0, 1); /* CLSE; worker stays alive */
+			worker_teardown(0, 1); /* CLSE the stream */
+			/* v27: reap the worker per command — ash reliably exits
+			 * after its first command batch (evidence: worker fed
+			 * rc=-1/EPIPE on every 2nd command across sessions).
+			 * Log the exit status (the "why" clue) and let the next
+			 * OPEN respawn from the main loop (proven fork ctx). */
+			if (worker_pid > 0) {
+				int wst = 0;
+				kill(worker_pid, SIGKILL);
+				waitpid(worker_pid, &wst, 0);
+				logmsg("worker reaped pid=%d status=0x%x",
+				       (int)worker_pid, wst);
+				worker_pid = -1;
+			}
+			if (worker_out >= 0) {
+				close(worker_out);
+				worker_out = -1;
+			}
+			if (worker_in >= 0) {
+				close(worker_in);
+				worker_in = -1;
+			}
 			return;
 		}
 		/* hold back a possible partial-marker tail */
@@ -917,6 +938,17 @@ int main(int argc, char **argv)
 	for (;;) {
 		if (g_exit)
 			break;
+
+		/* v27: respawn the worker if a command is pending but the
+		 * previous one was reaped (per-command worker lifecycle) */
+		pthread_mutex_lock(&q_mutex);
+		int need_spawn = have_stream && pending_cmd[0] &&
+				 worker_pid < 0;
+		pthread_mutex_unlock(&q_mutex);
+		if (need_spawn) {
+			if (worker_spawn() != 0)
+				logmsg("WARN: worker respawn failed");
+		}
 
 		/* feed the worker if a command is pending (pipe I/O only) */
 		pthread_mutex_lock(&q_mutex);
