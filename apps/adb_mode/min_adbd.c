@@ -452,13 +452,13 @@ static int worker_spawn(void)
 		close(in_pipe[0]);
 		close(out_pipe[1]);
 		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
-		/* v20: worker = cat — the simplest possible stdin->stdout
-		 * pumper. Eliminates ash entirely: if cat answers the feed,
-		 * ash is the problem; if cat also mutes, the kernel pipe
-		 * wake path is broken. */
-		const char *bb = access("/tmp/bin/busybox", X_OK) == 0 ?
-				  "/tmp/bin/busybox" : "/bin/busybox";
-		execl(bb, "busybox", "cat", (char *)NULL);
+		/* interactive ash worker: fed command lines via stdin; the
+		 * v15 "mute" was never the worker — the daemon froze in its
+		 * own ffs writes/reads before pumping (closed by the v24
+		 * isolation; the cat test proved the full pipeline live) */
+		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
+				 "/tmp/bin/sh" : "/bin/sh";
+		execl(sh, "sh", (char *)NULL);
 		ctrace("worker: exec FAILED (see errno)");
 		{
 			int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT,
