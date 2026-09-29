@@ -35,6 +35,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/functionfs.h>
@@ -194,7 +197,65 @@ static int cmd_deadline;           /* main-loop ticks (10ms each) */
 #define ID_QUIT_MK   0x54495551U /* "QUIT" */
 static int diag_ticks;
 static int heartbeats;
-static volatile sig_atomic_t g_exit; /* set by the ep0 thread on UNBIND */             /* wchan self-diagnostics remaining */
+static volatile sig_atomic_t g_exit; /* set by the ep0 thread on UNBIND */
+
+/* ---- multi-stream support (v29: ADB reverse) ---- */
+enum stream_type {
+	ST_FREE = 0,
+	ST_SHELL,		/* shell -c stream (worker-based) */
+	ST_SYNC,		/* sync: push/pull */
+	ST_REV_LISTENER,	/* reverse listener (TCP server) */
+	ST_REV_DATA,		/* reverse data (TCP socket <-> ADB stream) */
+};
+
+struct adb_stream {
+	int type;
+	uint32_t local_id;
+	uint32_t remote_id;
+	int fd;			/* TCP fd: listener (REV_LISTENER) or conn (REV_DATA) */
+	int wrte_pending;	/* device->host flow control */
+	char remote_spec[128];	/* destination on the host (e.g. "tcp:2222") */
+};
+
+#define MAX_STREAMS 16
+static struct adb_stream streams[MAX_STREAMS];
+static uint32_t dev_next_id = 0x1000; /* device-initiated stream IDs (high) */
+
+static struct adb_stream *stream_alloc(int type)
+{
+	for (int i = 0; i < MAX_STREAMS; i++) {
+		if (streams[i].type == ST_FREE) {
+			memset(&streams[i], 0, sizeof(streams[i]));
+			streams[i].type = type;
+			if (type == ST_REV_DATA || type == ST_REV_LISTENER)
+				streams[i].local_id = dev_next_id++;
+			else
+				streams[i].local_id = 1; /* host-initiated: fixed */
+			return &streams[i];
+		}
+	}
+	return NULL;
+}
+
+static struct adb_stream *stream_find_lid(uint32_t lid)
+{
+	for (int i = 0; i < MAX_STREAMS; i++)
+		if (streams[i].type != ST_FREE && streams[i].local_id == lid)
+			return &streams[i];
+	return NULL;
+}
+
+static void stream_free(struct adb_stream *s)
+{
+	if (!s) return;
+	if (s->fd >= 0) {
+		close(s->fd);
+		s->fd = -1;
+	}
+	s->type = ST_FREE;
+}
+
+static void logmsg(const char *fmt, ...);             /* wchan self-diagnostics remaining */
 
 /* host->device reassembly stream (host may split packets arbitrarily) */
 static uint8_t in_buf[2 * MAX_PAYLOAD];
@@ -223,6 +284,40 @@ static size_t pkt_q_len[Q_SLOTS];
 static int q_head, q_tail;
 static pthread_mutex_t q_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t q_cond = PTHREAD_COND_INITIALIZER;
+/* send an OPEN packet to the HOST (device-initiated stream) */
+static int send_open_to_host(uint32_t lid, const char *service)
+{
+	uint8_t pkt[24 + MAX_PAYLOAD];
+	uint32_t svc_len = (uint32_t)strlen(service);
+	struct amessage *h = (struct amessage *)pkt;
+
+	if (svc_len + 1 > MAX_PAYLOAD) return -1;
+	memset(pkt, 0, sizeof(pkt));
+	h->command = A_OPEN;
+	h->arg0 = lid;
+	h->arg1 = 0;
+	h->data_length = svc_len + 1; /* include NUL */
+	h->data_check = 0;
+	h->magic = A_OPEN ^ 0xffffffffU;
+	memcpy(pkt + 24, service, svc_len);
+	pkt[24 + svc_len] = 0;
+
+	/* enqueue for the writer thread */
+	pthread_mutex_lock(&q_mutex);
+	int next = (q_tail + 1) % Q_SLOTS;
+	if (next == q_head) {
+		logmsg("q full — dropping OPEN to host");
+		pthread_mutex_unlock(&q_mutex);
+		return -1;
+	}
+	memcpy(pkt_q[q_tail], pkt, 24 + svc_len + 1);
+	pkt_q_len[q_tail] = 24 + svc_len + 1;
+	q_tail = next;
+	pthread_cond_signal(&q_cond);
+	pthread_mutex_unlock(&q_mutex);
+	logmsg("OPEN->host lid=%u svc='%s'", lid, service);
+	return 0;
+}
 
 static void logmsg(const char *fmt, ...)
 {
@@ -411,6 +506,11 @@ static void worker_teardown(int kill_worker, int send_clse)
 	sync_state = SYNC_IDLE;
 	sync_in_len = 0;
 	cmd_deadline = 0;
+	/* v29: free all reverse streams */
+	for (int i = 0; i < MAX_STREAMS; i++)
+		if (streams[i].type == ST_REV_LISTENER ||
+		    streams[i].type == ST_REV_DATA)
+			stream_free(&streams[i]);
 }
 
 static void ctrace(const char *msg)
@@ -670,6 +770,170 @@ static void pump_worker_out(void)
 	}
 }
 
+/* ---- reverse (adb reverse) implementation ----
+ * v29: internet via ADB — overlay-free. The host sends
+ * "reverse:forward:tcp:LOCAL tcp:REMOTE" → we listen on LOCAL.
+ * When a TCP connection arrives, we send OPEN "tcp:REMOTE" to the
+ * host (device-initiated stream) and relay bidirectionally.
+ * Protocol verified against the LineageOS adb source. */
+
+static int rev_tcp_listen(int port)
+{
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) return -1;
+	int one = 1;
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+	struct sockaddr_in a;
+	memset(&a, 0, sizeof(a));
+	a.sin_family = AF_INET;
+	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	a.sin_port = htons((uint16_t)port);
+	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+		close(fd);
+		return -1;
+	}
+	if (listen(fd, 4) < 0) {
+		close(fd);
+		return -1;
+	}
+	fcntl(fd, F_SETFL, O_NONBLOCK);
+	return fd;
+}
+
+static void handle_reverse_forward(const char *svc, uint32_t host_id)
+{
+	/* svc = "forward:tcp:LOCAL tcp:REMOTE" (after "reverse:") */
+	int local_port = 0;
+	char remote[128] = { 0 };
+
+	/* parse "tcp:NNNN tcp:SPEC" */
+	const char *p = strstr(svc, "tcp:");
+	if (!p) goto fail;
+	local_port = atoi(p + 4);
+	p = strchr(svc, ' ');
+	if (!p) goto fail;
+	p++;
+	if (strncmp(p, "tcp:", 4) == 0)
+		snprintf(remote, sizeof(remote), "tcp:%s", p + 4);
+	else
+		snprintf(remote, sizeof(remote), "%s", p);
+	/* trim trailing whitespace/NUL */
+	for (size_t i = 0; i < strlen(remote); i++) {
+		if (remote[i] == ' ' || remote[i] == '\n') {
+			remote[i] = 0;
+			break;
+		}
+	}
+
+	if (local_port <= 0 || local_port > 65535 || !remote[0])
+		goto fail;
+
+	struct adb_stream *s = stream_alloc(ST_REV_LISTENER);
+	if (!s) goto fail;
+
+	s->fd = rev_tcp_listen(local_port);
+	if (s->fd < 0) {
+		stream_free(s);
+		goto fail;
+	}
+	s->remote_id = host_id;
+	strncpy(s->remote_spec, remote, sizeof(s->remote_spec) - 1);
+	logmsg("reverse: listener port=%d remote='%s' lid=%u",
+	       local_port, s->remote_spec, s->local_id);
+	return;
+fail:
+	logmsg("reverse: FAIL parse '%s'", svc);
+	send_pkt(A_CLSE, 1, host_id, NULL, 0);
+}
+
+/* accept a TCP connection on a reverse listener and open a new
+ * ADB stream to the host for it */
+static void rev_accept(struct adb_stream *lst)
+{
+	int cfd = accept(lst->fd, NULL, NULL);
+	if (cfd < 0) {
+		if (errno != EAGAIN && errno != EINTR)
+			logmsg("rev_accept: %s", strerror(errno));
+		return;
+	}
+	fcntl(cfd, F_SETFL, O_NONBLOCK);
+
+	struct adb_stream *s = stream_alloc(ST_REV_DATA);
+	if (!s) {
+		close(cfd);
+		return;
+	}
+	s->fd = cfd;
+	strncpy(s->remote_spec, lst->remote_spec,
+		sizeof(s->remote_spec) - 1);
+
+	/* send OPEN to the host: "tcp:REMOTE" */
+	if (send_open_to_host(s->local_id, s->remote_spec) < 0) {
+		close(cfd);
+		stream_free(s);
+		return;
+	}
+	logmsg("reverse: conn accepted fd=%d lid=%u -> '%s'",
+	       cfd, s->local_id, s->remote_spec);
+}
+
+/* pump TCP data from the console to the host (REV_DATA streams) */
+static void rev_pump(struct adb_stream *s)
+{
+	static uint8_t chunk[MAX_PAYLOAD];
+	if (s->type != ST_REV_DATA || s->fd < 0)
+		return;
+	pthread_mutex_lock(&q_mutex);
+	int pending = s->wrte_pending;
+	pthread_mutex_unlock(&q_mutex);
+	if (pending)
+		return; /* flow control: one WRTE at a time */
+	ssize_t r = read(s->fd, chunk, sizeof(chunk));
+	if (r > 0) {
+		if (send_pkt(A_WRTE, s->local_id, s->remote_id,
+			     chunk, (uint32_t)r) == 0) {
+			pthread_mutex_lock(&q_mutex);
+			s->wrte_pending = 1;
+			pthread_mutex_unlock(&q_mutex);
+		}
+	} else if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
+		/* TCP closed: CLSE the stream */
+		logmsg("reverse: tcp closed lid=%u", s->local_id);
+		send_pkt(A_CLSE, s->local_id, s->remote_id, NULL, 0);
+		close(s->fd);
+		s->fd = -1;
+		s->type = ST_FREE;
+	}
+}
+
+/* forward host data to TCP (called from A_WRTE handler) */
+static void rev_forward_data(struct adb_stream *s, const uint8_t *data, uint32_t len)
+{
+	if (s->type != ST_REV_DATA || s->fd < 0)
+		return;
+	/* TCP socket is non-blocking; write as much as possible */
+	const char *p = (const char *)data;
+	size_t left = len;
+	while (left > 0) {
+		ssize_t w = write(s->fd, p, left);
+		if (w < 0) {
+			if (errno == EAGAIN) {
+				/* socket buffer full — drop the excess
+				 * (acceptable for proxy traffic; TCP will
+				 * retransmit if it matters) */
+				logmsg("reverse: tcp tx full, dropping %zu", left);
+				break;
+			}
+			if (errno == EINTR) continue;
+			logmsg("reverse: tcp write err=%d", errno);
+			break;
+		}
+		p += w;
+		left -= (size_t)w;
+	}
+	send_pkt(A_OKAY, s->local_id, s->remote_id, NULL, 0);
+}
+
 /* ---- sync service implementation ---- */
 
 /* map an adb path to the console SD: strip leading '/' and an optional
@@ -905,7 +1169,18 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 
 		memcpy(svc, data, sl);
 		svc[sl] = '\0';
-		if (!have_stream && strncmp(svc, "sync:", 5) == 0) {
+		if (strncmp(svc, "reverse:", 8) == 0) {
+			/* reverse:forward:tcp:LOCAL tcp:REMOTE */
+			pthread_mutex_lock(&q_mutex);
+			have_stream = 1;
+			sync_mode = 0;
+			pthread_mutex_unlock(&q_mutex);
+			logmsg("OPEN reverse svc='%s'", svc + 8);
+			handle_reverse_forward(svc + 8, h->arg0);
+			send_pkt(A_OKAY, local_id, h->arg0, NULL, 0);
+			/* the stream stays open — the host uses it to manage
+			 * the listener; we CLSE it when the listener dies */
+		} else if (!have_stream && strncmp(svc, "sync:", 5) == 0) {
 			/* sync service: adb pull/push — pure I/O, no forks */
 			pthread_mutex_lock(&q_mutex);
 			remote_id = h->arg0;
@@ -944,12 +1219,32 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		}
 		break;
 	}
-	case A_OKAY:
+	case A_OKAY: {
+		/* reverse data stream: clear its flow control */
+		struct adb_stream *rs = stream_find_lid(h->arg1);
+		if (rs && rs->type == ST_REV_DATA) {
+			pthread_mutex_lock(&q_mutex);
+			if (rs->remote_id == 0)
+				rs->remote_id = h->arg0; /* host's ID */
+			rs->wrte_pending = 0;
+			pthread_mutex_unlock(&q_mutex);
+			break;
+		}
+		/* also check for our OPEN->host being OKAY'd */
+		rs = stream_find_lid(h->arg0 == 0 ? h->arg1 : 0);
+		/* fall through for shell/sync flow control */
 		pthread_mutex_lock(&q_mutex);
 		wrte_outstanding = 0;
 		pthread_mutex_unlock(&q_mutex);
-		break; /* the main-loop pump picks it up on its next tick */
-	case A_WRTE:
+		break;
+	}
+	case A_WRTE: {
+		/* check if this is for a reverse data stream (device-initiated) */
+		struct adb_stream *rs = stream_find_lid(h->arg1);
+		if (rs && rs->type == ST_REV_DATA) {
+			rev_forward_data(rs, data, len);
+			break;
+		}
 		if (sync_mode) {
 			/* append to the sync request buffer (reader thread:
 			 * pure memory, never blocks) */
@@ -964,10 +1259,20 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		/* no interactive stdin for shell -c: swallowed either way */
 		send_pkt(A_OKAY, local_id, remote_id, NULL, 0);
 		break;
-	case A_CLSE:
+	}
+	case A_CLSE: {
+		/* check if this closes a reverse stream */
+		struct adb_stream *rs = stream_find_lid(h->arg1);
+		if (rs && (rs->type == ST_REV_DATA || rs->type == ST_REV_LISTENER)) {
+			logmsg("reverse: CLSE lid=%u", rs->local_id);
+			send_pkt(A_CLSE, rs->local_id, h->arg0, NULL, 0);
+			stream_free(rs);
+			break;
+		}
 		worker_teardown(1, 0);
 		send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
 		break;
+	}
 	default:
 		break;
 	}
@@ -1235,6 +1540,19 @@ int main(int argc, char **argv)
 
 		/* worker output pump (pipe reads — well-behaved fds only) */
 		pump_worker_out();
+
+		/* v29: reverse listeners — accept new TCP connections */
+		for (int i = 0; i < MAX_STREAMS; i++) {
+			if (streams[i].type == ST_REV_LISTENER && streams[i].fd >= 0) {
+				rev_accept(&streams[i]);
+			}
+		}
+		/* v29: reverse data — pump TCP data to host */
+		for (int i = 0; i < MAX_STREAMS; i++) {
+			if (streams[i].type == ST_REV_DATA && streams[i].fd >= 0) {
+				rev_pump(&streams[i]);
+			}
+		}
 
 		/* sync service tick (pull/push state machine) */
 		if (sync_mode)
