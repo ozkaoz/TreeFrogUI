@@ -806,7 +806,11 @@ int main(int argc, char **argv)
 	 * shell-mute mystery; see out_pending note) */
 	ep_in_fd = open(path, O_RDWR | O_NONBLOCK);
 	snprintf(path, sizeof(path), "%s/ep2", g_dir);
-	ep_out_fd = open(path, O_RDWR);
+	/* nonblocking: the main loop is a watcher-style spin (usleep +
+	 * nonblocking checks) — poll()'s hrtimer path never fires on this
+	 * vendor kernel (evidence: 1000ms poll timeouts never returned,
+	 * while the exit_watcher's usleep cycles work perfectly) */
+	ep_out_fd = open(path, O_RDWR | O_NONBLOCK);
 	if (ep_in_fd < 0 || ep_out_fd < 0) {
 		logmsg("open endpoints: %s", strerror(errno));
 		return 1;
@@ -818,11 +822,43 @@ int main(int argc, char **argv)
 
 	for (;;) {
 		flush_out(); /* retry any pending device->host packet */
-		/* TOP-LEVEL command feed: pure pipe I/O to the startup
-		 * worker. NO PARENTHESES: `(cmd)` forces a subshell FORK
-		 * inside ash — forks are the suspected post-bind hang (v15/
-		 * v16 fed `(cmd)` and stayed mute); builtins must run
-		 * fork-free. */
+
+		/* WATCHER-STYLE LOOP (no poll()): this console's vendor
+		 * kernel never fires poll()'s hrtimer timeout (v18-v21
+		 * evidence: 1000ms poll timeouts never returned; the
+		 * exit_watcher's usleep cycles work flawlessly). Every fd
+		 * is nonblocking; usleep(10ms) paces the spin. */
+
+		/* ep0: drain ffs events nonblocking */
+		for (;;) {
+			struct usb_functionfs_event ev;
+			ssize_t r = read(ep0_fd, &ev, sizeof(ev));
+			if (r != (ssize_t)sizeof(ev))
+				break;
+			logmsg("ffs event type=%d", (int)ev.type);
+		}
+
+		/* ep_out: host->device stream, nonblocking */
+		for (;;) {
+			ssize_t r = read(ep_out_fd, in_buf + in_len,
+					 sizeof(in_buf) - in_len);
+			if (r < 0) {
+				if (errno != EAGAIN && errno != EINTR) {
+					logmsg("ep_out read: %s",
+					       strerror(errno));
+					goto out_dead;
+				}
+				break;
+			}
+			if (r == 0) {
+				logmsg("ep_out EOF — exiting");
+				goto out_dead;
+			}
+			in_len += (size_t)r;
+			process_in_stream();
+		}
+
+		/* feed the worker if a command is pending (pipe I/O) */
 		if (have_stream && pending_cmd[0] && worker_in >= 0) {
 			int rc = xwrite(worker_in, pending_cmd,
 					strlen(pending_cmd));
@@ -835,93 +871,23 @@ int main(int argc, char **argv)
 			diag_ticks = 15;
 			heartbeats = 15;
 		}
-		if (heartbeats > 0) {
-			logmsg("hb loop-alive hb=%d", 16 - heartbeats);
-			heartbeats--;
-		}
-		int n = 0;
-		pfd[n].fd = ep0_fd;
-		pfd[n].events = POLLIN;
-		n++;
-		pfd[n].fd = ep_out_fd;
-		pfd[n].events = POLLIN;
-		n++;
-		int shell_idx = -1;
-		if (have_stream && worker_out >= 0) {
-			shell_idx = n;
-			pfd[n].fd = worker_out;
-			pfd[n].events = POLLIN;
-			n++;
-		}
-		int timeout = diag_ticks > 0 ? 1000 : -1;
-		static unsigned long iters, ep0_poll, epout_poll, wk_poll,
-			rc0_poll, ev_drained;
-		int rc = poll(pfd, (nfds_t)n, timeout);
-		if (rc < 0) {
-			if (errno == EINTR)
-				continue;
-			logmsg("poll: %s", strerror(errno));
-			break;
-		}
-		iters++;
-		if (rc == 0)
-			rc0_poll++;
-		if (pfd[0].revents & POLLIN)
-			ep0_poll++;
-		if (pfd[1].revents & POLLIN)
-			epout_poll++;
-		if (shell_idx >= 0 && (pfd[shell_idx].revents & POLLIN))
-			wk_poll++;
-		if (diag_ticks > 0 && (iters & 0x3FF) == 0) {
-			logmsg("spin: iters=%lu ep0=%lu epout=%lu wk=%lu rc0=%lu ev=%lu",
-			       iters, ep0_poll, epout_poll, wk_poll, rc0_poll,
-			       ev_drained);
-		}
-		if (rc == 0 && diag_ticks > 0) {
+
+		/* worker output pump (nonblocking) */
+		pump_worker_out();
+
+		/* diagnostics sampling on the working timer (usleep) */
+		if (diag_ticks > 0) {
 			worker_diag(16 - diag_ticks);
 			diag_ticks--;
-			continue;
+		}
+		if (heartbeats > 0) {
+			logmsg("hb alive hb=%d", 16 - heartbeats);
+			heartbeats--;
 		}
 
-		if (pfd[0].revents & (POLLERR | POLLHUP)) {
-			logmsg("ep0 err/hup — exiting");
-			break;
-		}
-		if (pfd[0].revents & POLLIN) {
-			struct usb_functionfs_event ev;
-			while (xread(ep0_fd, &ev, sizeof(ev)) ==
-			       (ssize_t)sizeof(ev)) {
-				ev_drained++;
-				if (ev.type == FUNCTIONFS_UNBIND ||
-				    ev.type == FUNCTIONFS_DISABLE)
-					logmsg("ffs event type=%d", ev.type);
-			}
-		}
-		if (pfd[1].revents & (POLLERR | POLLHUP)) {
-			logmsg("ep_out err/hup — exiting");
-			break;
-		}
-		if (pfd[1].revents & POLLIN) {
-			ssize_t r = read(ep_out_fd, in_buf + in_len,
-					 sizeof(in_buf) - in_len);
-			if (r < 0) {
-				if (errno != EAGAIN && errno != EINTR) {
-					logmsg("ep_out read: %s",
-					       strerror(errno));
-					break;
-				}
-			} else if (r == 0) {
-				logmsg("ep_out EOF — exiting");
-				break;
-			} else {
-				in_len += (size_t)r;
-				process_in_stream();
-			}
-		}
-		if (shell_idx >= 0 && pfd[shell_idx].revents & POLLIN)
-			pump_worker_out();
+		usleep(10000);
 	}
-
+out_dead:
 	worker_teardown(1, 0);
 	return 0;
 }
