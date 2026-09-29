@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/functionfs.h>
@@ -175,9 +176,21 @@ static size_t in_len;
  * never block on a USB write again, whatever the host reader pattern.
  * Layout: [24B header][payload] — the header must go out as its OWN
  * transfer (adb's Windows backend reads exactly-24 header chunks). */
-static uint8_t out_pending[24 + MAX_PAYLOAD];
-static size_t out_len, out_off;
-static int zlp_needed;
+/* v23: dedicated WRITER THREAD. ROOT CAUSE (empirically closed):
+ * ffs IN-endpoint writes block until the host consumes them —
+ * O_NONBLOCK is IGNORED by this vendor f_fs (v22 froze inside the
+ * OKAY write). A write landing in a gap of the adb server's reader
+ * pattern froze the WHOLE daemon. Now the main loop NEVER writes
+ * ep_in: packets are queued here and a dedicated pthread does the
+ * blocking writes. A host-reader stall can only stall the writer —
+ * the protocol core keeps processing packets and drains the queue
+ * when the reader returns. */
+#define Q_SLOTS 8
+static uint8_t pkt_q[Q_SLOTS][24 + MAX_PAYLOAD];
+static size_t pkt_q_len[Q_SLOTS];
+static int q_head, q_tail;
+static pthread_mutex_t q_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t q_cond = PTHREAD_COND_INITIALIZER;
 
 static void logmsg(const char *fmt, ...)
 {
@@ -248,7 +261,36 @@ static int xwrite(int fd, const void *buf, size_t n)
 	return 0;
 }
 
-static void flush_out(void);
+/* writer thread: the ONLY place that writes ep_in (blocking OK —
+ * dedicated thread; the main loop never freezes on USB writes) */
+static void *writer_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		pthread_mutex_lock(&q_mutex);
+		while (q_head == q_tail)
+			pthread_cond_wait(&q_cond, &q_mutex);
+		uint8_t *p = pkt_q[q_head];
+		size_t len = pkt_q_len[q_head];
+		pthread_mutex_unlock(&q_mutex);
+
+		/* header as its OWN USB transfer (adb reads exactly-24
+		 * chunks), then payload, then ZLP if 512-multiple */
+		if (xwrite(ep_in_fd, p, 24) < 0)
+			logmsg("writer: hdr write err=%d", errno);
+		if (len > 24) {
+			if (xwrite(ep_in_fd, p + 24, len - 24) < 0)
+				logmsg("writer: payload err=%d", errno);
+			if (((len - 24) & 511) == 0 &&
+			    xwrite(ep_in_fd, p, 0) < 0)
+				logmsg("writer: zlp err=%d", errno);
+		}
+		pthread_mutex_lock(&q_mutex);
+		q_head = (q_head + 1) % Q_SLOTS;
+		pthread_mutex_unlock(&q_mutex);
+	}
+	return NULL;
+}
 
 /* Send one ADB packet as TWO separate ffs writes = TWO USB transfers
  * (header, then payload) — same as real adbd (daemon/usb.cpp Write():
@@ -275,51 +317,26 @@ static int send_pkt(uint32_t cmd, uint32_t arg0, uint32_t arg1,
 	h->data_check = len ? crc32_buf(data, len) : 0; /* payload-only crc */
 	h->magic = cmd ^ 0xffffffffU;
 
-	/* queue the packet (header as its own transfer, then payload),
-	 * flush as much as possible now; the rest retries from the loop */
-	out_len = out_off = 0;
-	memcpy(out_pending, hdr, sizeof(hdr));
-	out_len = 24;
-	if (len && data) {
-		memcpy(out_pending + 24, data, len);
-		out_len = 24 + len;
+	/* enqueue for the writer thread (main loop never writes ep_in) */
+	pthread_mutex_lock(&q_mutex);
+	int next = (q_tail + 1) % Q_SLOTS;
+	if (next == q_head) {
+		logmsg("q full — dropping pkt 0x%08x", cmd);
+		pthread_mutex_unlock(&q_mutex);
+		return -1;
 	}
-	/* ZLP marker: a zero-length payload write for maxpacket multiples
-	 * is represented by out_len ending exactly at a 512 boundary after
-	 * the header — handled in flush_out via the zlp flag */
-	zlp_needed = (len && (len & 511) == 0);
-	flush_out();
+	memcpy(pkt_q[q_tail], hdr, 24);
+	pkt_q_len[q_tail] = 24;
+	if (len && data) {
+		memcpy(pkt_q[q_tail] + 24, data, len);
+		pkt_q_len[q_tail] = 24 + len;
+	}
+	q_tail = next;
+	pthread_cond_signal(&q_cond);
+	pthread_mutex_unlock(&q_mutex);
 	return 0;
 }
 
-/* try to push the pending packet out; never blocks (O_NONBLOCK ep_in) */
-static void flush_out(void)
-{
-	while (out_off < out_len) {
-		size_t end = (out_off < 24) ? 24 : out_len;
-		ssize_t w = write(ep_in_fd, out_pending + out_off,
-				  end - out_off);
-		if (w < 0) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN)
-				return; /* retry from the main loop */
-			logmsg("flush_out err=%d — dropping packet", errno);
-			out_len = out_off = 0;
-			zlp_needed = 0;
-			return;
-		}
-		out_off += (size_t)w;
-	}
-	/* packet fully out — ZLP for maxpacket-multiple payloads */
-	if (zlp_needed && out_len >= 24) {
-		ssize_t w = write(ep_in_fd, out_pending, 0);
-		if (w < 0 && errno != EAGAIN && errno != EINTR)
-			logmsg("zlp err=%d", errno);
-		zlp_needed = 0;
-	}
-	out_len = out_off = 0;
-}
 
 /* ---------------- shell worker (persistent ash) ----------------
  * ARCHITECTURE (v11): the daemon NEVER forks from the packet-handler
@@ -820,8 +837,11 @@ int main(int argc, char **argv)
 	if (worker_spawn() != 0)
 		logmsg("WARN: worker spawn failed — shells will CLSE");
 
+	pthread_t wth;
+	if (pthread_create(&wth, NULL, writer_thread, NULL) != 0)
+		logmsg("WARN: writer thread create failed");
+
 	for (;;) {
-		flush_out(); /* retry any pending device->host packet */
 
 		/* WATCHER-STYLE LOOP (no poll()): this console's vendor
 		 * kernel never fires poll()'s hrtimer timeout (v18-v21
