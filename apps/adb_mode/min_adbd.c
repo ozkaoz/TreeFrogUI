@@ -822,7 +822,7 @@ static void *reader_thread(void *arg)
 		ssize_t r = read(ep_out_fd, in_buf + in_len,
 				 sizeof(in_buf) - in_len); /* blocking OK */
 		if (r < 0) {
-			if (errno == EINTR)
+			if (errno == EINTR || errno == EAGAIN)
 				continue;
 			logmsg("ep_out read: %s", strerror(errno));
 			g_exit = 1;
@@ -873,7 +873,7 @@ int main(int argc, char **argv)
 		logmsg("write strings: %s", strerror(errno));
 		return 1;
 	}
-	fcntl(ep0_fd, F_SETFL, O_RDWR | O_NONBLOCK);
+	fcntl(ep0_fd, F_SETFL, O_RDWR); /* blocking: the ep0 thread owns it */
 
 	snprintf(path, sizeof(path), "%s/ep1", g_dir);
 	/* O_NONBLOCK: ffs IN writes block until the host consumes — the
@@ -885,7 +885,7 @@ int main(int argc, char **argv)
 	 * nonblocking checks) — poll()'s hrtimer path never fires on this
 	 * vendor kernel (evidence: 1000ms poll timeouts never returned,
 	 * while the exit_watcher's usleep cycles work perfectly) */
-	ep_out_fd = open(path, O_RDWR | O_NONBLOCK);
+	ep_out_fd = open(path, O_RDWR); /* blocking: the reader thread owns it */
 	if (ep_in_fd < 0 || ep_out_fd < 0) {
 		logmsg("open endpoints: %s", strerror(errno));
 		return 1;
