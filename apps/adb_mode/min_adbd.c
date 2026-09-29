@@ -167,6 +167,18 @@ static int heartbeats;             /* wchan self-diagnostics remaining */
 static uint8_t in_buf[2 * MAX_PAYLOAD];
 static size_t in_len;
 
+/* device->host pending write queue. ROOT CAUSE FIX (2026-09-28,
+ * keeper2 experiment): ffs IN-endpoint writes BLOCK until the host
+ * consumes them — with no pending host read the daemon froze INSIDE
+ * send_pkt (the whole "mute" mystery). ep_in is now O_NONBLOCK and
+ * packets are queued here + retried from the main loop: the daemon can
+ * never block on a USB write again, whatever the host reader pattern.
+ * Layout: [24B header][payload] — the header must go out as its OWN
+ * transfer (adb's Windows backend reads exactly-24 header chunks). */
+static uint8_t out_pending[24 + MAX_PAYLOAD];
+static size_t out_len, out_off;
+static int zlp_needed;
+
 static void logmsg(const char *fmt, ...)
 {
 	va_list ap;
@@ -236,6 +248,8 @@ static int xwrite(int fd, const void *buf, size_t n)
 	return 0;
 }
 
+static void flush_out(void);
+
 /* Send one ADB packet as TWO separate ffs writes = TWO USB transfers
  * (header, then payload) — same as real adbd (daemon/usb.cpp Write():
  * header block + payload blocks; usb_ffs zero_mask ZLP). adb's Windows
@@ -261,15 +275,50 @@ static int send_pkt(uint32_t cmd, uint32_t arg0, uint32_t arg1,
 	h->data_check = len ? crc32_buf(data, len) : 0; /* payload-only crc */
 	h->magic = cmd ^ 0xffffffffU;
 
-	if (xwrite(ep_in_fd, hdr, sizeof(hdr)) < 0)
-		return -1;
-	if (len) {
-		if (xwrite(ep_in_fd, data, len) < 0)
-			return -1;
-		if ((len & 511) == 0 && xwrite(ep_in_fd, hdr, 0) < 0)
-			return -1; /* ZLP for maxpacket-multiple payloads */
+	/* queue the packet (header as its own transfer, then payload),
+	 * flush as much as possible now; the rest retries from the loop */
+	out_len = out_off = 0;
+	memcpy(out_pending, hdr, sizeof(hdr));
+	out_len = 24;
+	if (len && data) {
+		memcpy(out_pending + 24, data, len);
+		out_len = 24 + len;
 	}
+	/* ZLP marker: a zero-length payload write for maxpacket multiples
+	 * is represented by out_len ending exactly at a 512 boundary after
+	 * the header — handled in flush_out via the zlp flag */
+	zlp_needed = (len && (len & 511) == 0);
+	flush_out();
 	return 0;
+}
+
+/* try to push the pending packet out; never blocks (O_NONBLOCK ep_in) */
+static void flush_out(void)
+{
+	while (out_off < out_len) {
+		size_t end = (out_off < 24) ? 24 : out_len;
+		ssize_t w = write(ep_in_fd, out_pending + out_off,
+				  end - out_off);
+		if (w < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN)
+				return; /* retry from the main loop */
+			logmsg("flush_out err=%d — dropping packet", errno);
+			out_len = out_off = 0;
+			zlp_needed = 0;
+			return;
+		}
+		out_off += (size_t)w;
+	}
+	/* packet fully out — ZLP for maxpacket-multiple payloads */
+	if (zlp_needed && out_len >= 24) {
+		ssize_t w = write(ep_in_fd, out_pending, 0);
+		if (w < 0 && errno != EAGAIN && errno != EINTR)
+			logmsg("zlp err=%d", errno);
+		zlp_needed = 0;
+	}
+	out_len = out_off = 0;
 }
 
 /* ---------------- shell worker (persistent ash) ----------------
@@ -752,7 +801,10 @@ int main(int argc, char **argv)
 	fcntl(ep0_fd, F_SETFL, O_RDWR | O_NONBLOCK);
 
 	snprintf(path, sizeof(path), "%s/ep1", g_dir);
-	ep_in_fd = open(path, O_RDWR);
+	/* O_NONBLOCK: ffs IN writes block until the host consumes — the
+	 * daemon must never freeze on a write (root cause of the whole
+	 * shell-mute mystery; see out_pending note) */
+	ep_in_fd = open(path, O_RDWR | O_NONBLOCK);
 	snprintf(path, sizeof(path), "%s/ep2", g_dir);
 	ep_out_fd = open(path, O_RDWR);
 	if (ep_in_fd < 0 || ep_out_fd < 0) {
@@ -765,6 +817,7 @@ int main(int argc, char **argv)
 		logmsg("WARN: worker spawn failed — shells will CLSE");
 
 	for (;;) {
+		flush_out(); /* retry any pending device->host packet */
 		/* TOP-LEVEL command feed: pure pipe I/O to the startup
 		 * worker. NO PARENTHESES: `(cmd)` forces a subshell FORK
 		 * inside ash — forks are the suspected post-bind hang (v15/
