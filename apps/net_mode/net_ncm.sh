@@ -16,6 +16,13 @@ G=/sys/kernel/config/usb_gadget/ncm_net
 MODE="${1:-session}"
 PIDF=/tmp/net_daemon.pid
 
+# VIA-3 DIAGNOSTIC (2026-09-29, TEMPORAL — revertir tras el experimento):
+# matar hcdaemon a t=0 de la sesion para probar si es el mensajero del
+# velo azul (trigger ~30s). El poller host fallo (conecto a la sesion
+# vieja); este kill corre garantizado antes del trigger.
+killall hcdaemon 2>/dev/null
+echo "$(date '+%H:%M:%S' 2>/dev/null || echo t) VIA3: hcdaemon killed at session start" >> "$LOG"
+
 log() { echo "$(date '+%H:%M:%S' 2>/dev/null || echo t) $*" >> "$LOG"; }
 
 # ---- stop (daemon off) ----
