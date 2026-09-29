@@ -160,7 +160,8 @@ static int worker_in = -1;         /* daemon -> worker stdin */
 static int worker_out = -1;        /* worker stdout -> daemon */
 static int wrte_outstanding;       /* one in-flight device->host WRTE */
 static char pending_cmd[256];      /* stashed by A_OPEN, run from main loop */
-static int diag_ticks;             /* wchan self-diagnostics remaining */
+static int diag_ticks;
+static int heartbeats;             /* wchan self-diagnostics remaining */
 
 /* host->device reassembly stream (host may split packets arbitrarily) */
 static uint8_t in_buf[2 * MAX_PAYLOAD];
@@ -384,9 +385,13 @@ static int worker_spawn(void)
 		close(in_pipe[0]);
 		close(out_pipe[1]);
 		setenv("PATH", "/tmp/bin:/bin:/sbin:/usr/bin:/usr/sbin", 1);
-		const char *sh = access("/tmp/bin/sh", X_OK) == 0 ?
-				 "/tmp/bin/sh" : "/bin/sh";
-		execl(sh, "sh", (char *)NULL);
+		/* v20: worker = cat — the simplest possible stdin->stdout
+		 * pumper. Eliminates ash entirely: if cat answers the feed,
+		 * ash is the problem; if cat also mutes, the kernel pipe
+		 * wake path is broken. */
+		const char *bb = access("/tmp/bin/busybox", X_OK) == 0 ?
+				  "/tmp/bin/busybox" : "/bin/busybox";
+		execl(bb, "busybox", "cat", (char *)NULL);
 		ctrace("worker: exec FAILED (see errno)");
 		{
 			int t = open(ADB_LOG, O_WRONLY | O_APPEND | O_CREAT,
@@ -775,6 +780,11 @@ int main(int argc, char **argv)
 			pending_cmd[0] = '\0';
 			logmsg("worker fed rc=%d", rc);
 			diag_ticks = 15;
+			heartbeats = 15;
+		}
+		if (heartbeats > 0) {
+			logmsg("hb loop-alive hb=%d", 16 - heartbeats);
+			heartbeats--;
 		}
 		int n = 0;
 		pfd[n].fd = ep0_fd;
