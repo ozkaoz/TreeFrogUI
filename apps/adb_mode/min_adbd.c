@@ -791,12 +791,28 @@ int main(int argc, char **argv)
 			n++;
 		}
 		int timeout = diag_ticks > 0 ? 1000 : -1;
+		static unsigned long iters, ep0_poll, epout_poll, wk_poll,
+			rc0_poll, ev_drained;
 		int rc = poll(pfd, (nfds_t)n, timeout);
 		if (rc < 0) {
 			if (errno == EINTR)
 				continue;
 			logmsg("poll: %s", strerror(errno));
 			break;
+		}
+		iters++;
+		if (rc == 0)
+			rc0_poll++;
+		if (pfd[0].revents & POLLIN)
+			ep0_poll++;
+		if (pfd[1].revents & POLLIN)
+			epout_poll++;
+		if (shell_idx >= 0 && (pfd[shell_idx].revents & POLLIN))
+			wk_poll++;
+		if (diag_ticks > 0 && (iters & 0x3FF) == 0) {
+			logmsg("spin: iters=%lu ep0=%lu epout=%lu wk=%lu rc0=%lu ev=%lu",
+			       iters, ep0_poll, epout_poll, wk_poll, rc0_poll,
+			       ev_drained);
 		}
 		if (rc == 0 && diag_ticks > 0) {
 			worker_diag(16 - diag_ticks);
@@ -812,6 +828,7 @@ int main(int argc, char **argv)
 			struct usb_functionfs_event ev;
 			while (xread(ep0_fd, &ev, sizeof(ev)) ==
 			       (ssize_t)sizeof(ev)) {
+				ev_drained++;
 				if (ev.type == FUNCTIONFS_UNBIND ||
 				    ev.type == FUNCTIONFS_DISABLE)
 					logmsg("ffs event type=%d", ev.type);
