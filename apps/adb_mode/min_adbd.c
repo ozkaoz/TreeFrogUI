@@ -890,7 +890,17 @@ int main(int argc, char **argv)
 		logmsg("open endpoints: %s", strerror(errno));
 		return 1;
 	}
-	logmsg("ready: ffs=%s (ff/42/01, 2 bulk eps)", g_dir);
+	/* FD_CLOEXEC on every ffs fd: the worker (fork+exec'd from us)
+	 * must NOT inherit the ffs endpoints — ITS forks (ash running
+	 * external applets) copy the fd table, and with live ffs fds +
+	 * the daemon threads' pending operations that copy deadlocks on
+	 * this vendor kernel (evidence: builtins run over adb shell,
+	 * external applets freeze the worker). A clean worker table =
+	 * nothing ffs-related in its forks. */
+	fcntl(ep0_fd, F_SETFD, FD_CLOEXEC);
+	fcntl(ep_in_fd, F_SETFD, FD_CLOEXEC);
+	fcntl(ep_out_fd, F_SETFD, FD_CLOEXEC);
+	logmsg("ready: ffs=%s (ff/42/01, 2 bulk eps, cloexec)", g_dir);
 	selftest_exec("startup");
 	if (worker_spawn() != 0)
 		logmsg("WARN: worker spawn failed — shells will CLSE");
