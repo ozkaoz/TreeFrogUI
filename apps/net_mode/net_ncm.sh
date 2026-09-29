@@ -23,6 +23,12 @@ PIDF=/tmp/net_daemon.pid
 killall hcdaemon 2>/dev/null
 echo "$(date '+%H:%M:%S' 2>/dev/null || echo t) VIA3: hcdaemon killed at session start" >> "$LOG"
 
+# VELO AZUL: fb_clear a los ~35s (tras el trigger de ~30s del AVP).
+# La re-composicion del display (FBIOPUT+FBIOBLANK) limpia la capa azul
+# — el mismo mecanismo empirico del video player ("reproducir un video
+# limpia el velo"). Ejecuta en background, no bloquea la sesion.
+(sleep 35 && "$(dirname "$0")/fb_clear" >> "$LOG" 2>&1 && echo "$(date '+%H:%M:%S' 2>/dev/null || echo t) fb_clear executed" >> "$LOG") &
+
 log() { echo "$(date '+%H:%M:%S' 2>/dev/null || echo t) $*" >> "$LOG"; }
 
 # ---- stop (daemon off) ----
