@@ -1185,20 +1185,25 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 		memcpy(svc, data, sl);
 		svc[sl] = '\0';
 		if (strncmp(svc, "reverse:", 8) == 0) {
-			/* reverse:forward:tcp:LOCAL tcp:REMOTE */
-			pthread_mutex_lock(&q_mutex);
-			have_stream = 1;
-			sync_mode = 0;
-			pthread_mutex_unlock(&q_mutex);
+			/* reverse:forward:tcp:LOCAL;tcp:REMOTE */
+			/* v29 CRITICAL: do NOT set have_stream — the 30s
+			 * command timeout calls worker_teardown which
+			 * FREES all reverse listeners. Reverse is fire-
+			 * and-forget: parse → create → respond → done. */
 			logmsg("OPEN reverse svc='%s'", svc + 8);
 			handle_reverse_forward(svc + 8, h->arg0);
 			send_pkt(A_OKAY, local_id, h->arg0, NULL, 0);
-			/* v29 fix: the adb server expects the smart-socket
-			 * format: 4-char hex length + payload. "OKAY" with
-			 * strlen=4 → "0004OKAY" (8 bytes). Our previous
-			 * "OKAY\0" (5 bytes) was unparseable and hung the
-			 * adb reverse command. */
-			send_pkt(A_WRTE, local_id, h->arg0, "0004OKAY", 8);
+			/* v29 final: the adb server forwards the raw WRTE
+			 * bytes to the client; the client reads the first
+			 * 4 bytes as status. Evidence: "protocol fault
+			 * (status 30 30 30 34)" when we sent "0004OKAY".
+			 * Just "OKAY" (4 bytes, no prefix, no NUL). */
+			send_pkt(A_WRTE, local_id, h->arg0, "OKAY", 4);
+			/* CLSE: the host expects the stream to CLOSE after
+			 * the response (the real adbd detects EOF on the
+			 * socketpair and sends CLSE). Without CLSE, the
+			 * adb reverse command never completes. */
+			send_pkt(A_CLSE, local_id, h->arg0, NULL, 0);
 			/* the stream stays open — the host uses it to manage
 			 * the listener; we CLSE it when the listener dies */
 		} else if (!have_stream && strncmp(svc, "sync:", 5) == 0) {
