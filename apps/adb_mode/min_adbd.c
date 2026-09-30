@@ -65,9 +65,8 @@ static uint32_t crc32_buf(const void *data, size_t len);
 
 /* CNXN payload: identity + features. "shell" only (v1 raw) on purpose. */
 #define CNXN_PAYLOAD "device::ro.product.name=R36SX;ro.product.model=R36SX V2.6;" \
-	"ro.serialno=R36SX0001;ro.build.tags=test-keys;features=shell,cmd," \
-	"stat_v2,ls_v2,fixed_push_mkdir,fixed_push_symlink_timestamp,abb," \
-	"fuse,abb_exec,remount_shell,sendrecv_v2,reverse"
+	"ro.serialno=R36SX0001;ro.build.tags=test-keys;features=shell," \
+	"fixed_push_mkdir,fixed_push_symlink_timestamp"
 
 struct amessage {
 	uint32_t command;
@@ -965,6 +964,11 @@ static void sync_map_path(const char *in, char *out, size_t outsz)
 	const char *p = in;
 	while (*p == '/')
 		p++;
+	/* already a full console path — use as-is */
+	if (strncmp(p, "mnt/sdcard/", 11) == 0) {
+		snprintf(out, outsz, "/%s", p);
+		return;
+	}
 	if (strncmp(p, "sdcard", 6) == 0 && (p[6] == '/' || p[6] == '\0'))
 		p += p[6] == '/' ? 7 : 6;
 	snprintf(out, outsz, "/mnt/sdcard/%s", p);
