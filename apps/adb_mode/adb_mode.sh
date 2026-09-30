@@ -12,8 +12,9 @@
 # claim the endpoints BEFORE the UDC bind, so the bind is retried until
 # the daemon is ready.
 #
-# Modes: (no arg) blocking session (B button / cable unplug = exit)
-#        stop             teardown (used by restore and re-entry)
+# Modes: (no arg) daemon mode — network up, menu stays usable (toggle to stop)
+#        session         blocking (B button / cable unplug = exit — tests)
+#        stop            teardown (used by restore and re-entry)
 #
 # Selected via the "adb.mode" flag on the SD root (net_mode.sh dispatcher),
 # i.e. this is an EXPERIMENT transport, not production.
@@ -53,22 +54,37 @@ restore() {
     exit "$rc"
 }
 
-# ---- stop ----
+# ---- stop / toggle ----
+PIDF=/tmp/adb_daemon.pid
 if [ "${1:-}" = "stop" ]; then
     log "stop requested"
     teardown_gadget
     printf 'host\n' > "$ROLE_PATH" 2>/dev/null
+    rm -f "$PIDF"
     log "stop done"
     sync
     exit 0
 fi
+# DAEMON TOGGLE: if already running, this invocation means "stop"
+if [ -f "$PIDF" ] && [ "$(cat "$PIDF" 2>/dev/null)" != "" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; then
+    log "toggle: daemon already running — stopping"
+    exec "$0" stop
+fi
 
+MODE="${1:-daemon}"
 NET_EXIT=0
 trap "NET_EXIT=1" TERM
-trap restore EXIT INT
+
+# DAEMON MODE: setup everything, then exit — the menu stays usable.
+# Toggle off by re-invoking (the dispatcher toggles on the same entry).
+if [ "$MODE" = "daemon" ]; then
+    trap - EXIT INT TERM
+fi
+
+[ "$MODE" = "session" ] && trap restore EXIT INT
 
 : >> "$LOG"
-log "=== ADB(ffs) session uptime=$(cut -d' ' -f1 /proc/uptime) ==="
+log "=== ADB(ffs) $MODE uptime=$(cut -d' ' -f1 /proc/uptime) ==="
 
 # configfs
 mkdir -p /sys/kernel/config 2>/dev/null
@@ -160,7 +176,15 @@ fi
 log "ADB READY — PC: 'adb kill-server; adb devices' (expected: R36SX0001 device)"
 sync
 
-# block until B exit or cable unplug
+# DAEMON MODE: ADB is up, the menu stays usable — just exit
+if [ "$MODE" = "daemon" ]; then
+    echo $$ > "$PIDF"
+    log "DAEMON UP — menu navegable, ADB activo en background (toggle: re-invocar = stop)"
+    sync
+    exit 0
+fi
+
+# SESSION MODE (tests): block until B exit or cable unplug
 configured=0
 while :; do
     if [ "$NET_EXIT" = 1 ]; then
@@ -169,7 +193,7 @@ while :; do
     fi
     state=$(cat "/sys/class/udc/$UDC_NAME/state" 2>/dev/null || echo detached)
     [ "$state" = "configured" ] && configured=1
-    if [ "$configured" = 1 ] && [ "$state" = "not attached" ]; then
+    if [ "$configured" = "1" ] && [ "$state" = "not attached" ]; then
         log "PC disconnected"
         break
     fi
