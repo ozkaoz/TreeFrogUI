@@ -206,6 +206,53 @@ static int diag_ticks;
 static int heartbeats;
 static volatile sig_atomic_t g_exit; /* set by the ep0 thread on UNBIND */
 
+/* ---- integrated HTTP proxy (transparent internet via fetch+push) ----
+ * The daemon itself listens on TCP :3128. wget/curl on the console
+ * connect to 127.0.0.1:3128. The daemon saves requests to files and
+ * polls for responses (pushed from the PC via adb push). This avoids
+ * the orphaned-proxy kernel quirk (a proxy started via adb shell
+ * never accepts connections after the shell worker is killed).
+ * The proxy runs in the daemon main loop alongside sync/shell —
+ * no fork needed, no single-stream conflicts. */
+#define PROXY_PORT    3128
+#define PROXY_DIR     "/mnt/sdcard/.proxy"
+#define PROXY_REQ     PROXY_DIR "/req"
+#define PROXY_RESP   PROXY_DIR "/resp"
+#define PROXY_GO     PROXY_DIR "/go"
+#define PROXY_MAX    (64 * 1024)
+
+static int proxy_srv_fd = -1;  /* TCP listener */
+static int proxy_cli_fd = -1;  /* current HTTP client connection */
+static int proxy_state;        /* 0=idle, 1=reading, 2=waiting, 3=sending */
+enum { PROXY_IDLE = 0, PROXY_READING, PROXY_WAITING, PROXY_SENDING };
+static int proxy_req_len;
+static int proxy_sent;
+static int proxy_resp_len;
+static char proxy_req_buf[PROXY_MAX];
+
+static int proxy_init(void)
+{
+	struct sockaddr_in a;
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) return -1;
+	int one = 1;
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+	memset(&a, 0, sizeof(a));
+	a.sin_family = AF_INET;
+	a.sin_addr.s_addr = htonl(INADDR_ANY);
+	a.sin_port = htons(PROXY_PORT);
+	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+		close(fd);
+		return -1;
+	}
+	if (listen(fd, 2) < 0) {
+		close(fd);
+		return -1;
+	}
+	fcntl(fd, F_SETFL, O_NONBLOCK);
+	return fd;
+}
+
 /* ---- multi-stream support (v29: ADB reverse) ---- */
 enum stream_type {
 	ST_FREE = 0,
@@ -1536,6 +1583,15 @@ int main(int argc, char **argv)
 		logmsg("WARN: reader thread create failed");
 	if (pthread_create(&eth, NULL, ep0_thread, NULL) != 0)
 		logmsg("WARN: ep0 thread create failed");
+	/* integrated HTTP proxy (transparent internet via fetch+push) */
+	mkdir(PROXY_DIR, 0755);
+	unlink(PROXY_REQ); unlink(PROXY_RESP); unlink(PROXY_GO);
+	proxy_srv_fd = proxy_init();
+	if (proxy_srv_fd >= 0)
+		logmsg("proxy: listening on :%d", PROXY_PORT);
+	else
+		logmsg("WARN: proxy init failed (port %d)", PROXY_PORT);
+
 	logmsg("threads up (writer/reader/ep0)");
 
 	for (;;) {
@@ -1588,6 +1644,101 @@ int main(int argc, char **argv)
 		for (int i = 0; i < MAX_STREAMS; i++) {
 			if (streams[i].type == ST_REV_DATA && streams[i].fd >= 0) {
 				rev_pump(&streams[i]);
+			}
+		}
+
+		/* integrated HTTP proxy tick */
+		if (proxy_srv_fd >= 0) {
+			switch (proxy_state) {
+			case PROXY_IDLE: {
+				int cfd = accept(proxy_srv_fd, NULL, NULL);
+				if (cfd >= 0) {
+					fcntl(cfd, F_SETFL, O_NONBLOCK);
+					proxy_cli_fd = cfd;
+					proxy_req_len = 0;
+					proxy_state = PROXY_READING;
+					logmsg("proxy: conn accepted");
+				}
+				break;
+			}
+			case PROXY_READING: {
+				int r = read(proxy_cli_fd,
+					      proxy_req_buf + proxy_req_len,
+					      PROXY_MAX - proxy_req_len);
+				if (r > 0) {
+					proxy_req_len += r;
+					proxy_req_buf[proxy_req_len] = 0;
+					/* check for end of HTTP headers */
+					if (strstr(proxy_req_buf, "\r\n\r\n")) {
+						/* save request + trigger */
+						FILE *pf = fopen(PROXY_REQ, "w");
+						if (pf) {
+							fwrite(proxy_req_buf, 1, proxy_req_len, pf);
+							fclose(pf);
+						}
+						int g = open(PROXY_GO, O_CREAT|O_WRONLY, 0644);
+						if (g >= 0) close(g);
+						proxy_state = PROXY_WAITING;
+						logmsg("proxy: req saved (%d bytes)", proxy_req_len);
+					}
+				} else if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {
+					close(proxy_cli_fd);
+					proxy_cli_fd = -1;
+					proxy_state = PROXY_IDLE;
+				}
+				break;
+			}
+			case PROXY_WAITING: {
+				struct stat st;
+				if (stat(PROXY_RESP, &st) == 0 && st.st_size > 0) {
+					FILE *pf = fopen(PROXY_RESP, "r");
+					if (pf) {
+						proxy_resp_len = fread(proxy_req_buf, 1, PROXY_MAX, pf);
+						fclose(pf);
+						unlink(PROXY_RESP);
+						unlink(PROXY_GO);
+						unlink(PROXY_REQ);
+						proxy_sent = 0;
+						proxy_state = PROXY_SENDING;
+						logmsg("proxy: resp loaded (%d bytes)", proxy_resp_len);
+					}
+				} else {
+					/* timeout: 30s (3000 ticks × 10ms) */
+					static int wait_ticks;
+					if (++wait_ticks > 3000) {
+						wait_ticks = 0;
+						const char *err = "HTTP/1.0 504 Timeout\r\nContent-Length: 0\r\n\r\n";
+						write(proxy_cli_fd, err, strlen(err));
+						close(proxy_cli_fd);
+						proxy_cli_fd = -1;
+						proxy_state = PROXY_IDLE;
+						unlink(PROXY_GO); unlink(PROXY_REQ); unlink(PROXY_RESP);
+						logmsg("proxy: timeout");
+					}
+				}
+				if (proxy_state != PROXY_WAITING)
+					; /* keep counter reset on state change */
+				break;
+			}
+			case PROXY_SENDING: {
+				int w = write(proxy_cli_fd,
+					      proxy_req_buf + proxy_sent,
+					      proxy_resp_len - proxy_sent);
+				if (w > 0) {
+					proxy_sent += w;
+					if (proxy_sent >= proxy_resp_len) {
+						close(proxy_cli_fd);
+						proxy_cli_fd = -1;
+						proxy_state = PROXY_IDLE;
+						logmsg("proxy: sent OK (%d bytes)", proxy_resp_len);
+					}
+				} else if (w < 0 && errno != EAGAIN && errno != EINTR) {
+					close(proxy_cli_fd);
+					proxy_cli_fd = -1;
+					proxy_state = PROXY_IDLE;
+				}
+				break;
+			}
 			}
 		}
 
