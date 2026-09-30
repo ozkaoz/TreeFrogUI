@@ -175,7 +175,8 @@ static int sync_mode;              /* stream is a "sync:" service */
 static int sync_fd = -1;           /* file being pushed/pulled */
 static int sync_state;             /* 0=idle, 1=recv_data, 2=send_data */
 enum { SYNC_IDLE = 0, SYNC_RECV, SYNC_SEND };
-static uint8_t sync_in[8 * 1024];
+static uint8_t sync_in[2 * 1024 * 1024]; /* 2MB: large file pushes need
+ * room for USB-speed bursts (8KB was silently dropping data) */
 static size_t sync_in_len;
 static char sync_path[512];
 static uint32_t sync_mtime;        /* push: mtime from DONE */
@@ -786,7 +787,8 @@ static int rev_tcp_listen(int port)
 	struct sockaddr_in a;
 	memset(&a, 0, sizeof(a));
 	a.sin_family = AF_INET;
-	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	a.sin_addr.s_addr = htonl(INADDR_ANY); /* not LOOPBACK — the console's
+	 * lo interface is DOWN at boot (no 127.0.0.1); INADDR_ANY works */
 	a.sin_port = htons((uint16_t)port);
 	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
 		close(fd);
@@ -830,14 +832,22 @@ static void handle_reverse_forward(const char *svc_in, uint32_t host_id)
 		}
 	}
 
-	if (local_port <= 0 || local_port > 65535 || !remote[0])
+	if (local_port <= 0 || local_port > 65535 || !remote[0]) {
+		logmsg("reverse: FAIL validation port=%d remote='%s'",
+		       local_port, remote);
 		goto fail;
+	}
 
 	struct adb_stream *s = stream_alloc(ST_REV_LISTENER);
-	if (!s) goto fail;
+	if (!s) {
+		logmsg("reverse: FAIL stream_alloc (table full?)");
+		goto fail;
+	}
 
 	s->fd = rev_tcp_listen(local_port);
 	if (s->fd < 0) {
+		logmsg("reverse: FAIL listen port=%d errno=%d",
+		       local_port, errno);
 		stream_free(s);
 		goto fail;
 	}
@@ -1183,11 +1193,12 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 			logmsg("OPEN reverse svc='%s'", svc + 8);
 			handle_reverse_forward(svc + 8, h->arg0);
 			send_pkt(A_OKAY, local_id, h->arg0, NULL, 0);
-			/* v29 fix: the adb server expects a WRTE "OKAY\0"
-			 * confirmation that the listener was created (the
-			 * smart-socket protocol: reverse_service in real
-			 * adbd writes OKAY/FAIL through the stream) */
-			send_pkt(A_WRTE, local_id, h->arg0, "OKAY\0", 5);
+			/* v29 fix: the adb server expects the smart-socket
+			 * format: 4-char hex length + payload. "OKAY" with
+			 * strlen=4 → "0004OKAY" (8 bytes). Our previous
+			 * "OKAY\0" (5 bytes) was unparseable and hung the
+			 * adb reverse command. */
+			send_pkt(A_WRTE, local_id, h->arg0, "0004OKAY", 8);
 			/* the stream stays open — the host uses it to manage
 			 * the listener; we CLSE it when the listener dies */
 		} else if (!have_stream && strncmp(svc, "sync:", 5) == 0) {
