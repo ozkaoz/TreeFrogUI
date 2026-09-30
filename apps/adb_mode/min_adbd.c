@@ -1178,6 +1178,11 @@ static void handle_host_pkt(const struct amessage *h, const uint8_t *data,
 			logmsg("OPEN reverse svc='%s'", svc + 8);
 			handle_reverse_forward(svc + 8, h->arg0);
 			send_pkt(A_OKAY, local_id, h->arg0, NULL, 0);
+			/* v29 fix: the adb server expects a WRTE "OKAY\0"
+			 * confirmation that the listener was created (the
+			 * smart-socket protocol: reverse_service in real
+			 * adbd writes OKAY/FAIL through the stream) */
+			send_pkt(A_WRTE, local_id, h->arg0, "OKAY\0", 5);
 			/* the stream stays open — the host uses it to manage
 			 * the listener; we CLSE it when the listener dies */
 		} else if (!have_stream && strncmp(svc, "sync:", 5) == 0) {
