@@ -24,6 +24,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdint.h>
+
+/* forward declaration: crc32_buf is defined later but needed by
+ * send_open_to_host (which is in the stream table section above) */
+static uint32_t crc32_buf(const void *data, size_t len);
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -60,7 +65,9 @@
 
 /* CNXN payload: identity + features. "shell" only (v1 raw) on purpose. */
 #define CNXN_PAYLOAD "device::ro.product.name=R36SX;ro.product.model=R36SX V2.6;" \
-	"ro.serialno=R36SX0001;ro.build.tags=test-keys;features=shell"
+	"ro.serialno=R36SX0001;ro.build.tags=test-keys;features=shell,cmd," \
+	"stat_v2,ls_v2,fixed_push_mkdir,fixed_push_symlink_timestamp,abb," \
+	"fuse,abb_exec,remount_shell,sendrecv_v2,reverse"
 
 struct amessage {
 	uint32_t command;
@@ -298,7 +305,7 @@ static int send_open_to_host(uint32_t lid, const char *service)
 	h->arg0 = lid;
 	h->arg1 = 0;
 	h->data_length = svc_len + 1; /* include NUL */
-	h->data_check = 0;
+	h->data_check = crc32_buf(pkt + 24, svc_len + 1); /* proper CRC */
 	h->magic = A_OPEN ^ 0xffffffffU;
 	memcpy(pkt + 24, service, svc_len);
 	pkt[24 + svc_len] = 0;
@@ -507,11 +514,11 @@ static void worker_teardown(int kill_worker, int send_clse)
 	sync_state = SYNC_IDLE;
 	sync_in_len = 0;
 	cmd_deadline = 0;
-	/* v29: free all reverse streams */
-	for (int i = 0; i < MAX_STREAMS; i++)
-		if (streams[i].type == ST_REV_LISTENER ||
-		    streams[i].type == ST_REV_DATA)
-			stream_free(&streams[i]);
+	/* v29: do NOT free reverse streams here — worker_teardown is
+	 * called from the A_CLSE handler for ANY stream close (shell,
+	 * sync, management). Reverse listeners must survive shell CLSEs
+	 * and the command timeout. They only die when the daemon exits
+	 * or a reverse data stream explicitly gets CLSE. */
 }
 
 static void ctrace(const char *msg)
