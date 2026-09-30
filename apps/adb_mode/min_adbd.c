@@ -800,19 +800,24 @@ static int rev_tcp_listen(int port)
 	return fd;
 }
 
-static void handle_reverse_forward(const char *svc, uint32_t host_id)
+static void handle_reverse_forward(const char *svc_in, uint32_t host_id)
 {
-	/* svc = "forward:tcp:LOCAL tcp:REMOTE" (after "reverse:") */
+	/* svc = "forward:tcp:LOCAL;tcp:REMOTE" (after "reverse:") */
+	/* note: separator is SEMICOLON, not space (adb trace evidence) */
 	int local_port = 0;
 	char remote[128] = { 0 };
+	char svc[256];
 
-	/* parse "tcp:NNNN tcp:SPEC" */
+	strncpy(svc, svc_in, sizeof(svc) - 1);
+	svc[sizeof(svc) - 1] = 0;
+
 	const char *p = strstr(svc, "tcp:");
 	if (!p) goto fail;
 	local_port = atoi(p + 4);
-	p = strchr(svc, ' ');
-	if (!p) goto fail;
-	p++;
+	char *semi = strchr(svc, ';');
+	if (!semi) goto fail;
+	*semi = 0;
+	p = semi + 1;
 	if (strncmp(p, "tcp:", 4) == 0)
 		snprintf(remote, sizeof(remote), "tcp:%s", p + 4);
 	else
